@@ -4,7 +4,7 @@
 
 This project covers building a self-contained PowerShell module containing cmdlets that allow an administrator to connect to the Keepit service and perform various tasks. It is based on the structure of the Bohr and Keepit MCP tools, and is meant to provdie an alternative for customers who can't or don't want to run MCP tooling.
 
-In addition, this module provides cmdlets to perform restores of large numbers of deleted email items. It uses the Keepit platform API to find items matching the search criteria, identify what Keepit snapshots they are in, collect items in the same snapshot into restore jobs (a process known as "coalescing" the jobs), and then submits the jobs for action.
+In addition, this module provides cmdlets to perform restores of large numbers of deleted email items and OneDrive files. It uses the Keepit platform API to find items matching the search criteria, identify what Keepit snapshots they are in, collect items in the same snapshot into restore jobs (a process known as "coalescing" the jobs), and then submits the jobs for action.
 
 ## Requirements
 
@@ -24,7 +24,8 @@ This is the recommended method for development and testing:
 
 ```powershell
 # Import the module from the src directory
-Import-Module ./src/KeepitTools.psd1 -Force
+# Depending on what you downloaded, it may not be in the current folder so adjust as necessary.
+Import-Module ./KeepitTools.psd1 -Force
 
 # Verify the module is loaded
 Get-Module KeepitTools
@@ -35,6 +36,7 @@ Get-Module KeepitTools
 For permanent installation, copy the module to your PowerShell modules directory:
 
 **Windows:**
+
 ```powershell
 # Create module directory
 $modulePath = "$env:USERPROFILE\Documents\PowerShell\Modules\KeepitTools"
@@ -48,8 +50,9 @@ Import-Module KeepitTools
 ```
 
 **macOS/Linux:**
+
 ```powershell
-# Create module directory
+# Create module directory; edit this path as desired depending on your machine config
 $modulePath = "~/.local/share/powershell/Modules/KeepitTools"
 New-Item -ItemType Directory -Path $modulePath -Force
 
@@ -62,7 +65,7 @@ Import-Module KeepitTools
 
 ### Verifying Installation
 
-After importing the module, verify that all cmdlets are available:
+After importing the module, verify that the module is loaded and the cmdlets are available:
 
 ```powershell
 # List all available cmdlets in the module
@@ -79,6 +82,8 @@ Get-Module KeepitTools | Select-Object Name, Version
 
 ```powershell
 # Connect to Keepit service using PSCredential
+# Best practice: create an access token in the Keepit admin center just for these tools
+# Don't use your normal username/password!
 $cred = Get-Credential
 Connect-KeepitService -Credential $cred -Environment "us-dc"
 
@@ -86,8 +91,8 @@ Connect-KeepitService -Credential $cred -Environment "us-dc"
 $password = Read-Host "Enter password" -AsSecureString
 Connect-KeepitService -UserName "admin@example.com" -Password $password -Environment "us-dc"
 
-# Get all O365 connectors
-$connectors = Get-KeepitConnector
+# Get all M365 connectors
+$connectors = Get-KeepitConnector -type "o365-admin"
 $connectors | Format-Table ConnectorGuid, Name, Type, BackupRetention
 
 # Disconnect when done
@@ -104,25 +109,29 @@ Remove-Module KeepitTools
 
 ## Available Cmdlets
 
-| Cmdlet | Description |
-|--------|-------------|
-| `Connect-KeepitService` | Establishes authenticated connection to Keepit platform |
-| `Disconnect-KeepitService` | Closes connection and clears cached credentials |
-| `Get-KeepitConnector` | Retrieves accessible connectors, optionally filtered by type |
-| `Get-KeepitConnectorConfiguration` | Retrieves connector configuration and custom attributes |
-| `Get-KeepitSnapshot` | Retrieves snapshot information (latest, range, or count) |
-| `Get-KeepitJobs` | Retrieves active and future backup/restore jobs for a connector |
-| `Start-KeepitBackup` | Starts immediate or scheduled backup job on a connector |
-| `Search-KeepitSnapshot` | Searches backup data using the BSearch API |
-| `Convert-KeepitUPNToGuid` | Converts a User Principal Name to Keepit backup GUID |
-| `Enable-KeepitConnector` | Enables a disabled connector |
-| `Disable-KeepitConnector` | Disables a connector |
-| `Submit-KeepitJob` | Submits backup/restore jobs with raw XML configuration |
-| `Restore-KeepitBulkDeletedItems` | Bulk restores deleted email items from Keepit backups |
+| Cmdlet                             | Description                                                        |
+| ---------------------------------- | ------------------------------------------------------------------ |
+| `Connect-KeepitService`            | Establishes authenticated connection to Keepit platform            |
+| `Disconnect-KeepitService`         | Closes connection and clears cached credentials                    |
+| `Get-KeepitConnector`              | Retrieves accessible connectors, optionally filtered by type       |
+| `Get-KeepitConnectorConfiguration` | Retrieves connector configuration with optional workload filtering |
+| `Set-KeepitConnectorConfiguration` | **Experimental**: updates connector configuration with JSON        |
+| `Get-KeepitSnapshot`               | Retrieves snapshot information (latest, range, or count)           |
+| `Get-KeepitJobs`                   | Retrieves active and future backup/restore jobs for a connector    |
+| `Start-KeepitBackup`               | Starts immediate backup job on a connector                         |
+| `Search-KeepitSnapshot`            | Searches backup data using the BSearch API                         |
+| `Convert-KeepitUPNToGuid`          | Converts a User Principal Name to Keepit backup GUID               |
+| `Enable-KeepitConnector`           | Enables a disabled connector                                       |
+| `Disable-KeepitConnector`          | Disables a connector                                               |
+| `Submit-KeepitJob`                 | Submits backup/restore jobs with raw XML configuration             |
+| `Restore-KeepitBulkDeletedItems`   | Bulk restores deleted email items from Keepit backups              |
 
-## Examples
+## General Examples
 
 All cmdlets support pipeline input and output, allowing you to chain operations together efficiently.
+
+You can use pipelining
+with CSV files for operations that take a user principal name or GUID, too, such as `Search-KeepitSnapshot`. However, note that your CSV file must contain a header, and the columm that has the UPN / email address / GUID must have the proper label (e.g. if you are feeding a list of users to a cmdlet using their UPNs, make sure the CSV column with the users has the label of `userPrincipalName`.)
 
 ### Get Connection Info
 
@@ -226,81 +235,148 @@ Get-KeepitConnector -Type 'gsuite'
 ### Get Connector Configuration and Attributes
 
 ```powershell
-# Get configuration for a specific connector by GUID
-Get-KeepitConnectorConfiguration -Connector "your-connector-guid"
-
 # Get configuration by connector name
 Get-KeepitConnectorConfiguration -Connector "Production M365"
+
+# Get only Exchange workload configuration as a parsed object
+Get-KeepitConnectorConfiguration -Connector "Production M365" -Workload Exchange
+
+# Access parsed workload configuration properties
+$result = Get-KeepitConnectorConfiguration -Connector "Production M365" -Workload Exchange
+$result.Configuration.Exchange.EnabledCategories
 
 # Get configuration and all attributes
 Get-KeepitConnectorConfiguration -Connector "your-connector-guid" -Attributes "*"
 
 # Get specific attributes
-Get-KeepitConnectorConfiguration -Connector "Production M365" -Attributes "ng_backup_config,backup_config"
+Get-KeepitConnectorConfiguration -Connector "Production M365" -Attributes "ng_backup_config"
 
-# Get attributes for connectors that don't support default configuration
-Get-KeepitConnector -Type 'gsuite' | Get-KeepitConnectorConfiguration -Attributes "*"
 ```
+
+#### Workload Parameter
+
+The `-Workload` parameter filters and parses the configuration by specific workloads, returning a PSCustomObject. Valid workloads vary by connector type:
+
+| Connector Type             | Valid Workloads                       |
+| -------------------------- | ------------------------------------- |
+| o365-admin (Microsoft 365) | Exchange, OneDrive, SharePoint, Teams |
+| dynamics365                | CRM, PowerApps, PowerAutomate         |
+| azure-ad, powerbi          | Not supported (single config block)   |
+| DSL-based connectors       | Not supported yet                     |
+
+### Set Connector Configuration
+
+The Set-KeepitConnectorConfiguration cmdlet is experimental and does _not_ write any configuration data back to the service yet. That means it's harmless but also not useful yet.
 
 ### Search Backup Data
 
+Note that the -SearchTerms parameter allows you to specify fuzzy or exact search terms that are applied _to the item names and metadata_. There is no search for message or attachment _content_.
+
 ```powershell
 # Search for a user by UPN in the Users folder
-Search-KeepitSnapshot -Connector "Entra ID HSV" -PathRoot "/Users" -SearchTerms "test01"
+Search-KeepitSnapshot -Connector "Entra ID HSV" -RootPath "/Users" -SearchTerms "test01"
 
 # Search for mail messages in a user's Inbox
-Search-KeepitSnapshot -Connector "your-connector-guid" -PathRoot "/Users/user@example.com/Outlook/Inbox" -ItemType Message
+Search-KeepitSnapshot -Connector "your-connector-guid" -RootPath "/Users/user@example.com/Outlook/Inbox" -ItemType Message
 
 # Search within a date range
-Search-KeepitSnapshot -Connector "your-connector-guid" -PathRoot "/Users/user@example.com/Outlook" -StartTime "2024-01-01" -EndTime "2024-12-31"
-```
-
-### Convert UPN to Keepit GUID
-
-```powershell
-# Look up a user's Keepit GUID by their email address
-Convert-KeepitUPNToGuid -UserPrincipalName "user@example.com" -Connector "your-connector-guid"
-
-# Look up GUIDs for multiple users via pipeline
-"user1@example.com", "user2@example.com" | Convert-KeepitUPNToGuid -Connector "your-connector-guid"
-
-# Look up GUIDs from a CSV file (with UPN, Email, or UserPrincipalName column)
-Import-Csv users.csv | Convert-KeepitUPNToGuid -Connector "your-connector-guid"
-
-# Use the GUID in a search path
-$user = Convert-KeepitUPNToGuid -UserPrincipalName "user@example.com" -Connector "your-connector-guid"
-Search-KeepitSnapshot -Connector "your-connector-guid" -PathRoot "/Users/$($user.Guid)/Outlook/Inbox"
+Search-KeepitSnapshot -Connector "your-connector-guid" -RootPath "/Users/user@example.com/Outlook" -StartTime "2024-01-01" -EndTime "2024-12-31"
 ```
 
 ### Bulk Restore Deleted Items
 
 ```powershell
-# Restore deleted items for a single user
+# Restore deleted email items for a single user
 Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "your-connector-guid" -RootPath "Inbox" -StartDate "2024-01-01" -EndDate "2024-12-31"
 
 # Restore deleted items for multiple users from a CSV file
 # CSV should have columns like UPN, Email, or UserPrincipalName
 Import-Csv users.csv | Restore-KeepitBulkDeletedItems -Connector "your-connector-guid" -RootPath "Inbox" -StartDate "2024-01-01" -EndDate "2024-12-31"
 
+# Restore deleted OneDrive files for a user
+Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "your-odb-connector" -RootPath "OneDrive" -Type OneDrive -StartDate "2024-01-01" -EndDate "2024-12-31" -Recursive
+
 # Preview what would be restored without actually restoring
 Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "your-connector-guid" -RootPath "Deleted Items" -StartDate (Get-Date).AddDays(-30) -EndDate (Get-Date) -WhatIf
 ```
 
-## Design principles
+## Searching snapshots
 
-The code and artifacts in this project should be designed and built using the following principles.
+The `Search-KeepitSnapshot` cmdlet allows you to search a set of snapshots looking for items that match your search criteria. This doesn't do a full-text content search, but it does allow you to quickly find deleted items, or to enumerate items in a snapshot. For example, if you want to know what mailboxes were backed up ins the most recent snapshot you can do this:
 
-* This project uses the Keepit APIs described in the "api-endpoints.md" file.
-* This project will be structured as a [PowerShell script module](https://learn.microsoft.com/en-us/powershell/scripting/developer/module/how-to-write-a-powershell-script-module?view=powershell-7.5) that can be packaged and installed as a single unit.
-* It will contain multiple PowerShell [cmdlets](https://learn.microsoft.com/en-us/powershell/scripting/developer/cmdlet/cmdlet-overview?view=powershell-7.5).
-* The project code itself will be written in PowerShell, using only constructs and assemblies that can be loaded and run on Linux, macOS, and Windows.
-* Follow the [Microsoft required development guidelines for all PowerShell cmdlets](https://learn.microsoft.com/en-us/powershell/scripting/developer/cmdlet/required-development-guidelines?view=powershell-7.5).
-* This project follows the [Microsoft recommended guidelines](https://learn.microsoft.com/en-us/powershell/scripting/developer/cmdlet/strongly-encouraged-development-guidelines?view=powershell-7.5) for all PowerShell cmdlets.
-* This project follows the [Microsoft advisory guidelines](https://learn.microsoft.com/en-us/powershell/scripting/developer/cmdlet/advisory-development-guidelines?view=powershell-7.5) for all PowerShell cmdlets.
-* All cmdlets use structured exception handling.
-* All cmdlets have correct and complete help that works with _Get-Help_.
+```
+# get the time of the most recent snapshot from the desired connector
+Get-KeepitSnapshot -connector "ExO Only" -StartDate 2026-01-13 -EndDate 2026-01-13 -Reverse -ResultSize 1
 
-## implementation considerations
+Id            : 464eb1bee279152deadbeef7d06de5439172d1258008553fd247f75671a6636f
+Timestamp     : 2026-01-12T08:07:10Z
+Type          : c
+Size          : 3774744689677
+Account       : abcdef-04223f-abcdef
+ConnectorGuid : zwu9lv-pdq123-abcdef
+ConnectorName : ExO Only
 
-* Because the Keepit API uses basic HTTP authentication, each API call must include an authentication header that contains the global "Auth" string created when Connect-KeepitService is run.
+# use the timestamp value to limit the search
+Search-KeepitSnapshot -connector "ExO Only" -pathroot "/Users" -recursive:$false -starttime 2026-01-12T23:27:46Z -endtime 2026-01-12T23:27:46Z | ft title
+
+Title
+-----
+02Test User - test02@blackdotpub.com
+Admin - Admin@blackdotpub.com
+...
+Tom Robichaux - tom@blackdotpub.com
+```
+It's important to note that when you're specifying a search path, *the trailing slash matters*. Using a RootPath of "/Users", for example, on a OneDrive connector won't find anything. Using "/Users/" will find what you're looking for. This is a result of the way bsearch is implemented.
+
+## Restoring items in bulk
+
+Restoring items in bulk works slightly differently depending on whether you're restoring Entra users, OneDrive files, or email. In all cases, it's important to understand that _only deleted items will be restored_, and they will be restored _only to their original location_. The Keepit platform tags deleted items with a special label; when you click the "Deleted Items" button in the Keepit admin center's snapshot viewer, you're toggling this view.
+
+### A note about CSV files
+
+CSV files are always supposed to have a header that specifies the names of the columns. All of the Keepit PowerShell tools that can use CSV files require this header. A simple CSV file to specify 3 users would thus look like this:
+
+```
+userPrincipalName
+user1@example.com
+user2@example.com
+user3@example.com
+```
+
+### Restoring deleted email
+
+Here's a simple example of restoring deleted mail for a single user:
+
+```
+Restore-KeepitBulkDeletedItems -connector "ExO Only" -UserPrincipalName paulr@blackdotpub.com `
+  -StartDate 2026-01-10 -EndDate 2026-01-13 -RootPath "Inbox"
+```
+
+That tells the tool to find deleted email messages in the Inbox folder of the user `paulr@blackdotpub.com` that were deleted between midnight 10th January and midnight 13th January (that is, from 00:00Z on 10/01 until 23:59Z on 13/01). To restore messages in any folder below the Inbox, you would add the `-recursive` switch. But if you only wanted to restore messages in the "Travel" folder under Inbox, you wouldn't use `-recursive`; instead, you'd use `-RootPath Inbox\Travel`.
+
+You can use pipelining to fill the `-UserPrincipalName` value. If you wanted to restore all email deleted from the Inbox for a set of users, you'd create a CSV file containing their addresses and then do something like this:
+
+```
+Import-CSV ./usersToRestore.csv | Restore-KeepitBulkDeletedItems -Connector "ExO Only" -rootPath "Inbox" -startDate 2026-01-01 -endDate 2026-01-10
+```
+### Restoring deleted files
+Currently OneDrive restores require you to specify the `-Type OneDrive` flag as well as a `RootPath` value. Due to a change in the way Microsoft creates OneDrives, older Keepit snapshots will have user OneDrive documents stored at a path of `/Users/_guid_/OneDrive/Documents`, but newer snapshots will use a path of `/Users/_guid_/OneDriveSP/DocLibs/Documents/Content`. The cmdlet is smart enough to use the new-style path if it doesn't find any deleted items at the old-style path _if you specify it_. It's probably best to default to use `-RootPath /OneDrive/` and let the cmdlet figure out what to do.
+
+Here's an example of finding what files would be restored from a user:
+
+```
+restore-keepitbulkdeleteditems -UserPrincipalName orphan01@blackdotpub.com -connector "PSTools ODB" -RootPath "/OneDrive/" `
+   -Startdate 2026-01-01 -enddate 2026-01-13T18:00 -whatif -Type onedrive
+WARNING: Search-KeepitSnapshot: No matching results found
+WhatIf: Would restore 2 items in 1 restore job(s)
+  Snapshot 2026-01-13T16:49:10Z : 2 items
+    + Change Log 2026 Edition.docx
+    + Production tracking.xlsx
+
+TotalItems JobCount ItemsBySnapshot
+---------- -------- ---------------
+         2        1 {[2026-01-13T16:49:10Z, 2]}
+```
+The extra "WARNING" message is Search-KeepitSnapshot saying it didn't find anything at the original /OneDrive/ path; this is expected. In this case, the tool found 2 deleted files that were deleted within a single snapshot period, so they could be restored in a single job. To actually restore them, you'd run the same cmdlet again without the `-WhatIf` switch.         
+
 
