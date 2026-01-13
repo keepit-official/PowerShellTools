@@ -1,0 +1,4952 @@
+#Requires -Version 7.0
+
+<#
+.SYNOPSIS
+    Keepit Tools PowerShell Module
+.DESCRIPTION
+    Provides cmdlets for using the Keepit API from PowerShell scripts, including cmdlets to
+    connect and disconnect from the service, get the status of backup jobs, start backup jobs,
+    and get information about existing Microsoft 365 connectors.
+.NOTES
+    Author: Keepit
+    Version: 0.7.7
+#>
+
+# Module-scoped variables
+$script:KeepitAuth = $null
+$script:KeepitRegion = $null
+$script:KeepitUserId = $null
+
+# Valid Keepit environments (used for parameter validation)
+$script:ValidKeepitEnvironments = @(
+    'ws.keepit', 'au-sy', 'ca-tr', 'dk-co', 'de-fr', 'uk-ld', 'us-dc', 'ch-zh',
+    'ws-test', 'ws-test-b', 'ws-test-c', 'staging', 'dev'
+)
+
+# Keepit connector types mapping (internal name -> display name)
+$script:ConnectorTypes = @{
+    'o365-admin'  = 'Microsoft 365'
+    'dynamics365' = 'Dynamics / Power Platform'
+    'sforce'      = 'Salesforce'
+    'gsuite'      = 'Google Workspace'
+    'powerbi'     = 'Power BI'
+    'zendesk'     = 'Zendesk'
+    'azure-do'    = 'Azure DevOps'
+    'azure-ad'    = 'Entra ID'
+    'dsl'         = 'Keepit DSL'
+    # DSL-based connectors (actual API type is 'dsl')
+    'jira'        = 'Jira'
+    'confluence'  = 'Confluence'
+    'bamboohr'    = 'BambooHR'
+    'docusign'    = 'Docusign'
+    'jsm'         = 'Jira Service Management'
+    'okta'        = 'Okta'
+    'miro'        = 'Miro'
+    'gitlab'      = 'GitLab'
+    'monday'      = 'Monday'
+}
+
+# Maps user-friendly connector type names to actual API types
+# Used for DSL-based connectors that share the same underlying API type
+$script:ConnectorTypeApiMapping = @{
+    'jira'       = 'dsl'
+    'confluence' = 'dsl'
+    'bamboohr'   = 'dsl'
+    'docusign'   = 'dsl'
+    'jsm'        = 'dsl'
+    'okta'       = 'dsl'
+    'miro'       = 'dsl'
+    'gitlab'     = 'dsl'
+    'monday'     = 'dsl'
+}
+
+# Valid connector type names for parameter validation
+$script:ValidConnectorTypes = $script:ConnectorTypes.Keys
+
+# Define valid workloads per connector type
+$script:WorkloadsByConnectorType = @{
+    'o365-admin'  = @('Exchange', 'OneDrive', 'SharePoint', 'Teams', 'UnifiedGroups')
+    'dynamics365' = @('CRM', 'PowerApps', 'PowerAutomate')
+}
+
+# Map user-friendly workload names to JSON property names
+$script:WorkloadToJsonKey = @{
+    # M365 workloads
+    'Exchange'      = 'Exchange'
+    'OneDrive'      = 'OneDriveSP'
+    'SharePoint'    = 'SharePointNG'
+    'Teams'         = 'UnifiedGroups'
+    'UnifiedGroups' = 'UnifiedGroups'  # Synonym for Teams
+    # Dynamics 365 workloads
+    'CRM'           = 'CRM'
+    'PowerApps'     = 'PowerApps'
+    'PowerAutomate' = 'PowerAutomate'
+}
+
+#region Helper Functions
+
+<#
+.SYNOPSIS
+    Creates a Basic authentication header from credentials
+.PARAMETER Credential
+    PSCredential object containing username and password
+.OUTPUTS
+    String - Base64 encoded authentication header value
+#>
+function New-AuthHeader {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [PSCredential]$Credential
+    )
+
+    $username = $Credential.UserName
+    $password = $Credential.GetNetworkCredential().Password
+    $authString = "${username}:${password}"
+    $authBytes = [System.Text.Encoding]::UTF8.GetBytes($authString)
+    $authBase64 = [System.Convert]::ToBase64String($authBytes)
+
+    return "Basic $authBase64"
+}
+
+<#
+.SYNOPSIS
+    Gets the authentication header to use for API calls
+.PARAMETER Credential
+    Optional PSCredential to generate a new auth header
+.OUTPUTS
+    String - Authentication header value
+#>
+function Get-AuthHeader {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [PSCredential]$Credential
+    )
+
+    if ($Credential) {
+        return New-AuthHeader -Credential $Credential
+    }
+
+    if (-not $script:KeepitAuth) {
+        throw "Not connected to Keepit service. Run Connect-KeepitService first or provide Credential parameter."
+    }
+
+    return $script:KeepitAuth
+}
+
+<#
+.SYNOPSIS
+    Constructs the base URL for Keepit API calls
+.PARAMETER Environment
+    Optional environment override. If not provided, uses cached environment.
+.OUTPUTS
+    String - Base URL for the configured environment
+#>
+function Get-KeepitBaseUrl {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$Environment
+    )
+
+    $env = if ($Environment) { $Environment } else { $script:KeepitRegion }
+
+    if (-not $env) {
+        throw "Keepit environment not configured. Run Connect-KeepitService first or provide Environment parameter."
+    }
+
+    return "https://$env.keepit.com"
+}
+
+<#
+.SYNOPSIS
+    Gets the user ID, either from cache or by querying the API
+.PARAMETER AuthHeader
+    The authentication header to use for API calls
+.PARAMETER BaseUrl
+    The base URL for API calls
+.OUTPUTS
+    String - User GUID
+#>
+function Get-KeepitUserId {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AuthHeader,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BaseUrl
+    )
+
+    # If we have a cached user ID and are using cached auth, return it
+    if ($script:KeepitUserId -and $AuthHeader -eq $script:KeepitAuth) {
+        return $script:KeepitUserId
+    }
+
+    # Otherwise, query the API
+    Write-Verbose "Getting user ID from API"
+    $headers = @{
+        'Authorization' = $AuthHeader
+        'Content-Type' = 'application/xml'
+    }
+    $userResponse = Invoke-RestMethod -Uri "$BaseUrl/users/" -Method Get -Headers $headers -ErrorAction Stop
+
+    if (-not $userResponse.user.id) {
+        throw "Unable to retrieve user ID from response"
+    }
+
+    return $userResponse.user.id
+}
+
+<#
+.SYNOPSIS
+    Converts a DateTime to ISO 8601 format for API requests
+.PARAMETER DateTime
+    The DateTime to convert
+.OUTPUTS
+    String - ISO 8601 formatted timestamp
+.NOTES
+    DateTimeKind handling:
+    - Utc: Used as-is
+    - Local: Converted to UTC
+    - Unspecified: Treated as UTC (for ISO8601 strings without timezone indicator)
+#>
+function ConvertTo-KeepitTimestamp {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [DateTime]$DateTime
+    )
+
+    # If Kind is Unspecified (e.g., from ISO8601 string without Z suffix), treat as UTC
+    # This allows users to specify times like "2025-12-04T09:50:00" and have them
+    # interpreted as UTC rather than local time
+    if ($DateTime.Kind -eq [System.DateTimeKind]::Unspecified) {
+        $DateTime = [DateTime]::SpecifyKind($DateTime, [System.DateTimeKind]::Utc)
+    }
+
+    return $DateTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+<#
+.SYNOPSIS
+    Gets the display name for a connector type
+.PARAMETER ConnectorType
+    The internal connector type name (e.g., 'o365-admin')
+.OUTPUTS
+    String - The display name (e.g., 'Microsoft 365'), or the original type if not found
+#>
+function Get-ConnectorTypeDisplayName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ConnectorType
+    )
+
+    if ($script:ConnectorTypes.ContainsKey($ConnectorType)) {
+        return $script:ConnectorTypes[$ConnectorType]
+    }
+    # Return original type if not in mapping (for forward compatibility)
+    return $ConnectorType
+}
+
+<#
+.SYNOPSIS
+    Resolves a connector type name (key or display name) to the internal key
+.PARAMETER TypeName
+    The connector type name, which can be either:
+    - An internal key (e.g., 'o365-admin', 'azure-ad', 'jsm')
+    - A display name (e.g., 'Microsoft 365', 'Entra ID', 'Jira Service Management')
+.OUTPUTS
+    String - The internal key if found, or $null if not recognized
+#>
+function Resolve-ConnectorTypeName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TypeName
+    )
+
+    # Check if it's already an internal key
+    if ($script:ConnectorTypes.ContainsKey($TypeName)) {
+        return $TypeName
+    }
+
+    # Check if it's a display name (case-insensitive)
+    foreach ($key in $script:ConnectorTypes.Keys) {
+        if ($script:ConnectorTypes[$key] -eq $TypeName) {
+            return $key
+        }
+    }
+
+    # Not found
+    return $null
+}
+
+<#
+.SYNOPSIS
+    Validates a connector type name (key or display name)
+.PARAMETER TypeName
+    The connector type name to validate
+.OUTPUTS
+    Boolean - $true if valid, $false otherwise
+#>
+function Test-ConnectorTypeName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TypeName
+    )
+
+    return $null -ne (Resolve-ConnectorTypeName -TypeName $TypeName)
+}
+
+<#
+.SYNOPSIS
+    Validates workload parameter values against connector type
+.DESCRIPTION
+    Validates that the specified workloads are valid for the given connector type.
+    Throws an error if the connector type does not support workloads or if invalid
+    workload names are specified.
+.PARAMETER Workload
+    Array of workload names to validate
+.PARAMETER ConnectorType
+    The connector type to validate against (e.g., 'o365-admin', 'dynamics365')
+.OUTPUTS
+    None. Throws an error if validation fails.
+.EXAMPLE
+    Test-WorkloadParameter -Workload @('Exchange', 'Teams') -ConnectorType 'o365-admin'
+
+    Validates that Exchange and Teams are valid workloads for o365-admin connectors.
+#>
+function Test-WorkloadParameter {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Workload,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ConnectorType
+    )
+
+    $validWorkloads = $script:WorkloadsByConnectorType[$ConnectorType]
+    if (-not $validWorkloads) {
+        $displayName = Get-ConnectorTypeDisplayName -ConnectorType $ConnectorType
+        throw "The -Workload parameter is not supported for $displayName ($ConnectorType) connectors. This connector type has a single configuration block."
+    }
+
+    foreach ($w in $Workload) {
+        if ($w -notin $validWorkloads) {
+            $displayName = Get-ConnectorTypeDisplayName -ConnectorType $ConnectorType
+            throw "Invalid workload '$w' for $displayName ($ConnectorType) connectors. Valid workloads are: $($validWorkloads -join ', ')"
+        }
+    }
+
+    Write-Verbose "Validated workloads: $($Workload -join ', ')"
+}
+
+<#
+.SYNOPSIS
+    Validates that a string is a valid URL
+.DESCRIPTION
+    Validates that the specified string is a valid URL with at minimum a scheme and host.
+    Used for validating SharePoint site URLs in configuration management.
+.PARAMETER Url
+    The URL string to validate
+.OUTPUTS
+    None. Throws an error if validation fails.
+.EXAMPLE
+    Test-SiteUrl -Url "https://contoso.sharepoint.com/sites/Marketing"
+
+    Validates that the string is a valid URL.
+#>
+function Test-SiteUrl {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Url
+    )
+
+    try {
+        $uri = [System.Uri]::new($Url)
+        if (-not $uri.IsAbsoluteUri) {
+            throw "URL must be absolute (include scheme like https://)"
+        }
+        if ([string]::IsNullOrWhiteSpace($uri.Host)) {
+            throw "URL must include a host"
+        }
+        if ($uri.Scheme -notin @('http', 'https')) {
+            throw "URL scheme must be http or https"
+        }
+        Write-Verbose "Validated URL: $Url"
+    }
+    catch [System.UriFormatException] {
+        throw "Invalid URL format '$Url': $($_.Exception.Message)"
+    }
+}
+
+<#
+.SYNOPSIS
+    Validates that a string is a valid GUID format
+.DESCRIPTION
+    Validates that the specified string is a valid GUID (globally unique identifier).
+    Used for validating group GUIDs in Teams/UnifiedGroups configuration management.
+.PARAMETER Guid
+    The GUID string to validate
+.OUTPUTS
+    None. Throws an error if validation fails.
+.EXAMPLE
+    Test-GroupGuid -Guid "0aa94c0a-c5e5-417f-8cfa-6744649e25da"
+
+    Validates that the string is a valid GUID.
+#>
+function Test-GroupGuid {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Guid
+    )
+
+    $guidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    if ($Guid -notmatch $guidPattern) {
+        throw "Invalid GUID format '$Guid'. Expected format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    }
+    Write-Verbose "Validated GUID: $Guid"
+}
+
+<#
+.SYNOPSIS
+    Resolves a connector identity (name or GUID) to a GUID
+.DESCRIPTION
+    Takes a connector identity that can be either a connector name or a GUID,
+    and returns the corresponding GUID. If a GUID is provided, it validates
+    that the connector exists. If a name is provided, it looks up the connector
+    and returns its GUID.
+
+    Uses cached authentication from Connect-KeepitService.
+.PARAMETER Identity
+    The connector name or GUID to resolve
+.OUTPUTS
+    PSCustomObject with properties:
+        - ConnectorGuid: The resolved GUID
+        - Name: The connector name
+        - Type: The connector type
+#>
+function Resolve-KeepitConnectorIdentity {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Identity
+    )
+
+    Write-Verbose "Resolving connector identity: $Identity"
+
+    # Get authentication and connection info
+    $authHeader = Get-AuthHeader
+    $baseUrl = Get-KeepitBaseUrl
+    $userId = Get-KeepitUserId -AuthHeader $authHeader -BaseUrl $baseUrl
+
+    # Check if Identity looks like a GUID (three groups of 6 alphanumeric chars)
+    $isGuid = $Identity -match '^[a-z0-9]{6}-[a-z0-9]{6}-[a-z0-9]{6}$'
+
+    # Get all connectors
+    $headers = @{
+        'Authorization' = $authHeader
+        'Content-Type' = 'application/xml'
+        'Accept' = 'application/vnd.keepit.v4+xml'
+    }
+
+    $uri = "$baseUrl/users/$userId/devices"
+    Write-Verbose "Fetching connectors from: $uri"
+
+    $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+
+    if (-not $response.devices.cloud) {
+        throw "No connectors found"
+    }
+
+    # Normalize to array
+    $devices = if ($response.devices.cloud -is [System.Array]) {
+        $response.devices.cloud
+    } else {
+        @($response.devices.cloud)
+    }
+
+    # Find matching connector
+    $matchingConnector = $null
+
+    if ($isGuid) {
+        # Look up by GUID (case-insensitive)
+        $matchingConnector = $devices | Where-Object {
+            $_.guid -eq $Identity -or $_.guid -eq $Identity.ToLower()
+        } | Select-Object -First 1
+    }
+
+    if (-not $matchingConnector) {
+        # Look up by name (case-insensitive)
+        $matchingConnector = $devices | Where-Object {
+            $_.name -eq $Identity
+        } | Select-Object -First 1
+    }
+
+    if (-not $matchingConnector) {
+        throw "Connector '$Identity' not found"
+    }
+
+    # Determine device type (handle DSL connectors)
+    $deviceType = if ($matchingConnector.type -eq 'dsl') {
+        $matchingConnector.'agent-type'
+    } else {
+        $matchingConnector.type
+    }
+
+    return [PSCustomObject]@{
+        ConnectorGuid = $matchingConnector.guid.ToLower()
+        Name = $matchingConnector.name
+        Type = $deviceType
+    }
+}
+
+#endregion
+
+#region Public Cmdlets
+
+<#
+.SYNOPSIS
+    Connects to the Keepit service and establishes authentication
+.DESCRIPTION
+    Creates and caches an authentication header for subsequent API calls to the Keepit platform.
+    The connection remains active until Disconnect-KeepitService is called or the session ends.
+.PARAMETER Credential
+    PSCredential object containing Keepit username and password
+.PARAMETER UserName
+    Keepit username (email address; case-sensitive). Must be used together with Password parameter.
+.PARAMETER Password
+    Keepit password as SecureString. Must be used together with Username parameter.
+.PARAMETER Environment
+    Keepit data center environment. Valid values:
+    Production: ws.keepit, au-sy, ca-tr, dk-co, de-fr, uk-ld, us-dc, ch-zh
+    Testing: ws-test, ws-test-b, ws-test-c, staging, dev
+.EXAMPLE
+    $cred = Get-Credential
+    Connect-KeepitService -Credential $cred -Environment "us-dc"
+
+    Connects to the US data center using a PSCredential object
+.EXAMPLE
+    $password = ConvertTo-SecureString "MyPassword" -AsPlainText -Force
+    Connect-KeepitService -UserName "user@example.com" -Password $password -Environment "ws-test"
+
+    Connects to a test environment using username and password
+
+.EXAMPLE
+    $connection = Connect-KeepitService -Credential $cred -Environment "us-dc" | Format-List
+
+    Connects and returns connection information object
+.OUTPUTS
+Returns PSCustomObject with properties:
+        - Environment: The connected Keepit environment
+        - UserId: The authenticated user's GUID
+        - Connected: Boolean indicating connection status
+        - ConnectedAt: Timestamp of connection
+.NOTES
+    The authentication header is stored in a module-scoped variable and used by other cmdlets.
+    You must provide either -Credential OR both -UserName and -Password parameters.
+#>
+function Connect-KeepitService {
+    [CmdletBinding(DefaultParameterSetName = 'Credential')]
+    param(
+        [Parameter(Mandatory = $true, ParameterSetName = 'Credential')]
+        [PSCredential]$Credential,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'UserPassword')]
+        [ValidateNotNullOrEmpty()]
+        [string]$UserName,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'UserPassword')]
+        [ValidateNotNull()]
+        [SecureString]$Password,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateScript({ $_ -in $script:ValidKeepitEnvironments })]
+        [string]$Environment
+    )
+
+    try {
+        Write-Verbose "Connecting to Keepit environment: $Environment"
+
+        # Build credential object if UserName/Password provided
+        if ($PSCmdlet.ParameterSetName -eq 'UserPassword') {
+            Write-Verbose "Creating credential from UserName and Password"
+            $Credential = New-Object System.Management.Automation.PSCredential($UserName, $Password)
+        }
+
+        # Create and store authentication header
+        $script:KeepitAuth = New-AuthHeader -Credential $Credential
+        $script:KeepitRegion = $Environment
+
+        # Test connection by getting user ID
+        $baseUrl = Get-KeepitBaseUrl
+        $uri = "$baseUrl/users/"
+
+        $headers = @{
+            'Authorization' = $script:KeepitAuth
+            'Content-Type' = 'application/xml'
+        }
+
+        Write-Verbose "Testing connection to $uri"
+        $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+
+        # Extract and store user ID from response
+        if ($response.user.id) {
+            $script:KeepitUserId = $response.user.id
+            Write-Verbose "Successfully connected. User ID: $($script:KeepitUserId)"
+            Write-Host "Successfully connected to Keepit service ($Environment)" -ForegroundColor Green
+
+            # Return connection info if PassThru is specified
+            
+                [PSCustomObject]@{
+                    Environment = $Environment
+                    UserId = $script:KeepitUserId
+                    Connected = $true
+                    ConnectedAt = [DateTime]::UtcNow
+                }
+        }
+        else {
+            throw "Unable to retrieve user ID from response"
+        }
+    }
+    catch {
+        # Clean up on failure
+        $script:KeepitAuth = $null
+        $script:KeepitRegion = $null
+        $script:KeepitUserId = $null
+
+        throw "Failed to connect to Keepit service: $($_.Exception.Message)"
+    }
+}
+
+<#
+.SYNOPSIS
+    Disconnects from the Keepit service
+.DESCRIPTION
+    Clears the cached authentication header and connection information.
+    After disconnecting, you must call Connect-KeepitService again before using other cmdlets.
+.EXAMPLE
+    Disconnect-KeepitService
+
+    Disconnects from the Keepit service
+.OUTPUTS
+    None
+.NOTES
+    This cmdlet clears module-scoped variables but does not invalidate the API token
+#>
+function Disconnect-KeepitService {
+    [CmdletBinding()]
+    param()
+
+    try {
+        if ($script:KeepitAuth) {
+            Write-Verbose "Disconnecting from Keepit service"
+
+            $script:KeepitAuth = $null
+            $script:KeepitRegion = $null
+            $script:KeepitUserId = $null
+
+            Write-Host "Disconnected from Keepit service" -ForegroundColor Green
+        }
+        else {
+            Write-Warning "Not currently connected to Keepit service"
+        }
+    }
+    catch {
+        throw "Error during disconnect: $($_.Exception.Message)"
+    }
+}
+
+<#
+.SYNOPSIS
+    Retrieves Keepit connectors for the authenticated user
+.DESCRIPTION
+    Gets a list of accessible connectors configured in Keepit. By default returns all connector
+    types, but can be filtered to specific types using the -Type parameter, or to a specific
+    connector using the -Identity parameter.
+    Returns connector objects with details including GUID, name, type, and retention settings.
+.PARAMETER Identity
+    Optional connector name or GUID to retrieve a specific connector.
+    If not specified, returns all connectors (optionally filtered by Type).
+.PARAMETER Type
+    Optional connector type(s) to filter. Can specify one or more types using either:
+    - Internal keys: o365-admin, dynamics365, sforce, gsuite, powerbi, zendesk, azure-do, azure-ad,
+                     dsl, jira, confluence, bamboohr, docusign, jsm, okta, miro, gitlab, monday
+    - Display names: 'Microsoft 365', 'Entra ID', 'Jira Service Management', etc.
+    If not specified, returns all connector types.
+.EXAMPLE
+    Get-KeepitConnector
+
+    Retrieves all connectors using cached connection
+.EXAMPLE
+    Get-KeepitConnector -Identity "Production M365"
+
+    Retrieves the connector named "Production M365"
+.EXAMPLE
+    Get-KeepitConnector -Id "v25zn4-q77we0-0m4y7e"
+
+    Retrieves a connector by its GUID (using the -Id alias)
+.EXAMPLE
+    Get-KeepitConnector -Type 'o365-admin'
+
+    Retrieves only Microsoft 365 connectors using internal key
+.EXAMPLE
+    Get-KeepitConnector -Type 'Microsoft 365'
+
+    Retrieves only Microsoft 365 connectors using display name
+.EXAMPLE
+    Get-KeepitConnector -Type 'o365-admin', 'dynamics365'
+
+    Retrieves Microsoft 365 and Dynamics 365 connectors
+.EXAMPLE
+    Get-KeepitConnector -Type 'Jira Service Management', 'Confluence'
+
+    Retrieves Jira Service Management and Confluence connectors using display names
+.EXAMPLE
+    $connectors = Get-KeepitConnector | Where-Object { $_.Name -like "*Production*" }
+
+    Retrieves connectors and filters for production environments
+.OUTPUTS
+    PSCustomObject[] - Array of connector objects with properties:
+        - ConnectorGuid: Connector GUID (lowercase)
+        - Name: Connector name (max 200 characters)
+        - Type: Connector type (e.g., 'o365-admin')
+        - TypeDisplayName: Human-readable connector type (e.g., 'Microsoft 365')
+        - Created: Creation timestamp
+        - BackupRetention: Backup retention period
+        - RetentionUpdated: Last retention update timestamp
+        - OrgLink: Organization link (if available)
+.NOTES
+    Only returns accessible connectors. Use -Type to filter by connector type.
+#>
+function Get-KeepitConnector {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false, ValueFromPipelineByPropertyName = $true)]
+        [Alias('Id')]
+        [ValidateNotNullOrEmpty()]
+        [string]$Identity,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateScript({ Test-ConnectorTypeName -TypeName $_ })]
+        [string[]]$Type
+    )
+
+    try {
+        Write-Verbose "Retrieving Keepit connectors"
+
+        # Resolve type names to internal keys (handles both keys and display names)
+        $resolvedTypes = if ($Type) {
+            $Type | ForEach-Object { Resolve-ConnectorTypeName -TypeName $_ }
+        } else {
+            $null
+        }
+
+        # Get authentication header from cache
+        $authHeader = Get-AuthHeader
+
+        # Get base URL and user ID from cache
+        $baseUrl = Get-KeepitBaseUrl
+        $userId = $script:KeepitUserId
+
+        if (-not $userId) {
+            throw "Unable to determine user ID. Ensure you are connected using Connect-KeepitService."
+        }
+
+        Write-Verbose "User ID: $userId"
+
+        # Build request
+        $uri = "$baseUrl/users/$userId/devices"
+        $headers = @{
+            'Authorization' = $authHeader
+            'Content-Type' = 'application/xml'
+            'Accept' = 'application/vnd.keepit.v4+xml'  # v4+ required for DSL connector device-type
+        }
+
+        Write-Verbose "Fetching connectors from: $uri"
+
+        # Make API call
+        $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+
+        # Parse XML response
+        if (-not $response.devices.cloud) {
+            Write-Verbose "No connectors found in response"
+            return
+        }
+
+        # Normalize to array (PowerShell XML may return single object or array)
+        $devices = if ($response.devices.cloud -is [System.Array]) {
+            $response.devices.cloud
+        }
+        else {
+            @($response.devices.cloud)
+        }
+
+        Write-Verbose "Found $($devices.Count) total connectors"
+
+        # Filter and transform devices
+        $filteredCount = 0
+        foreach ($device in $devices) {
+            # Skip inaccessible devices
+            if ($device.accessible -eq 'false') {
+                Write-Verbose "Skipping inaccessible connector: $($device.name)"
+                continue
+            }
+
+            # Validate required fields
+            if (-not $device.guid -or -not $device.name) {
+                Write-Verbose "Skipping connector with missing required fields"
+                continue
+            }
+
+            # Determine device type (handle DSL connectors)
+            $deviceType = if ($device.type -eq 'dsl') {
+                $device.'agent-type'
+            }
+            else {
+                $device.type
+            }
+
+            # Filter by type if specified
+            if ($resolvedTypes -and $deviceType -notin $resolvedTypes) {
+                Write-Verbose "Skipping connector: $($device.name) (type: $deviceType) - not in requested types"
+                continue
+            }
+
+            # Filter by Identity if specified (match name or GUID)
+            if ($Identity) {
+                $guidMatch = $device.guid -eq $Identity -or $device.guid -eq $Identity.ToLower()
+                $nameMatch = $device.name -eq $Identity
+                if (-not $guidMatch -and -not $nameMatch) {
+                    continue
+                }
+            }
+
+            $filteredCount++
+
+            # Create and output connector object
+            [PSCustomObject]@{
+                ConnectorGuid    = $device.guid.ToLower()
+                Name             = $device.name.Substring(0, [Math]::Min(200, $device.name.Length))
+                Type             = $deviceType
+                TypeDisplayName  = Get-ConnectorTypeDisplayName -ConnectorType $deviceType
+                Created          = $device.created
+                BackupRetention  = $device.'backup-retention'
+                RetentionUpdated = $device.'backup-retention-updated'
+                OrgLink          = $device.orglink
+            }
+        }
+
+        $typeDesc = if ($Type) { ($Type -join ', ') } else { 'all types' }
+        Write-Verbose "Returned $filteredCount connectors ($typeDesc)"
+    }
+    catch {
+        throw "Failed to retrieve connectors: $($_.Exception.Message)"
+    }
+}
+
+<#
+.SYNOPSIS
+    Retrieves snapshot information for a Keepit connector
+.DESCRIPTION
+    Gets snapshot data for a specified connector. Supports three modes:
+    - Latest: Returns the most recent snapshot
+    - Range: Returns all snapshots within a date range
+    - Count: Returns the count of snapshots within a date range
+
+.PARAMETER Connector
+    The connector name or GUID to query snapshots for.
+    Can be piped from Get-KeepitConnector.
+.PARAMETER Latest
+    Switch to retrieve only the most recent snapshot
+.PARAMETER StartDate
+    Start date / time for the snapshot range query (inclusive)
+.PARAMETER EndDate
+    End date / time for the snapshot range query (inclusive)
+.PARAMETER CountOnly
+    Switch to return only the count of snapshots in the specified range
+.PARAMETER Reverse
+    Search backwards from StartDate instead of forwards. Useful for finding the most recent snapshot
+    at or before a specific timestamp. Use with -ResultSize 1 to get just the closest snapshot.
+.PARAMETER ResultSize
+    Maximum number of snapshots to return. Default is 99.
+    Use "unlimited" to retrieve all matching snapshots (may require multiple API calls).
+    Only applicable with Range and Count parameter sets.
+.EXAMPLE
+    Get-KeepitSnapshot -Connector "Production M365" -Latest
+
+    Gets the most recent snapshot for the connector named "Production M365"
+.EXAMPLE
+    Get-KeepitSnapshot -Connector "abc123-def456" -Latest
+
+    Gets the most recent snapshot for the specified connector GUID
+.EXAMPLE
+    Get-KeepitConnector | Get-KeepitSnapshot -Latest
+
+    Gets the most recent snapshot for all connectors
+.EXAMPLE
+    Get-KeepitSnapshot -Connector "abc123" -StartDate (Get-Date).AddDays(-30) -EndDate (Get-Date)
+
+    Gets all snapshots from the last 30 days
+.EXAMPLE
+    Get-KeepitSnapshot -Connector "abc123" -StartDate "2024-01-01" -EndDate "2024-12-31" -CountOnly
+
+    Returns the count of snapshots for the year 2024
+.EXAMPLE
+    Get-KeepitSnapshot -Connector "abc123" -StartDate "2025-12-28T03:16:10Z" -EndDate (Get-Date).AddYears(-1) -Reverse -ResultSize 1
+
+    Gets the most recent snapshot at or before the specified timestamp by searching backwards up to 1 year
+.OUTPUTS
+    PSCustomObject[] - Array of snapshot objects (for Latest and Range modes) with properties:
+        - Root: Snapshot root path
+        - Timestamp: Snapshot timestamp
+        - Type: Snapshot type
+        - Size: Snapshot size
+        - Account: Account GUID
+        - ConnectorGuid: The connector GUID this snapshot belongs to
+    Int32 - Count of snapshots (for CountOnly mode)
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+    Returns up to 99 snapshots by default. Use -ResultSize to change this limit or specify "unlimited".
+#>
+function Get-KeepitSnapshot {
+    [CmdletBinding(DefaultParameterSetName = 'Latest')]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'Latest')]
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'Range')]
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'Count')]
+        [ValidateNotNullOrEmpty()]
+        [Alias('ConnectorGuid', 'Name')]
+        [string]$Connector,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'Latest')]
+        [switch]$Latest,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'Range')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'Count')]
+        [DateTime]$StartDate,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'Range')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'Count')]
+        [DateTime]$EndDate,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'Count')]
+        [switch]$CountOnly,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'Range')]
+        [Parameter(Mandatory = $false, ParameterSetName = 'Count')]
+        [ValidateScript({
+            if ($_ -eq 'unlimited') { return $true }
+            if ($_ -is [int] -and $_ -ge 1) { return $true }
+            if ($_ -match '^\d+$' -and [int]$_ -ge 1) { return $true }
+            throw "ResultSize must be a positive integer or 'unlimited'"
+        })]
+        $ResultSize = 99,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'Range')]
+        [switch]$Reverse
+    )
+
+    begin {
+        Write-Verbose "Get-KeepitSnapshot: ParameterSetName = $($PSCmdlet.ParameterSetName)"
+
+        # Validate date parameters if provided
+        if ($PSCmdlet.ParameterSetName -in @('Range', 'Count')) {
+            $today = [DateTime]::Today
+
+            if ($StartDate.Date -gt $today) {
+                throw "StartDate cannot be in the future. StartDate: $($StartDate.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), Today: $($today.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
+            }
+
+            if ($EndDate.Date -gt $today) {
+                throw "EndDate cannot be in the future. EndDate: $($EndDate.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), Today: $($today.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
+            }
+
+            # When Reverse is specified, StartDate should be later than EndDate (we search backwards)
+            if (-not $Reverse -and $StartDate -gt $EndDate) {
+                throw "StartDate cannot be later than EndDate. StartDate: $($StartDate.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), EndDate: $($EndDate.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
+            }
+        }
+
+        # Get authentication header and base URL once for all pipeline items
+        try {
+            $authHeader = Get-AuthHeader
+            $baseUrl = Get-KeepitBaseUrl
+            $userId = Get-KeepitUserId -AuthHeader $authHeader -BaseUrl $baseUrl
+        }
+        catch {
+            throw "Failed to initialize: $($_.Exception.Message)"
+        }
+    }
+
+    process {
+        try {
+            # Resolve connector identity to GUID
+            $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $connectorGuid = $resolved.ConnectorGuid
+            Write-Verbose "Processing connector: $($resolved.Name) ($connectorGuid)"
+
+            switch ($PSCmdlet.ParameterSetName) {
+                'Latest' {
+                    # GET /users/{userId}/devices/{deviceId}/history/latest
+                    $uri = "$baseUrl/users/$userId/devices/$connectorGuid/history/latest"
+                    $headers = @{
+                        'Authorization' = $authHeader
+                        'Accept' = 'application/vnd.keepit.v1+xml'
+                        'Content-Type' = 'application/xml'
+                    }
+
+                    Write-Verbose "Fetching latest snapshot from: $uri"
+                    Write-Verbose "Request headers: $($headers | ConvertTo-Json -Compress)"
+                    $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+
+                    # Parse response - API returns <backup> elements
+                    $backups = $null
+                    if ($response.history.backup) {
+                        $backups = $response.history.backup
+                    }
+                    elseif ($response.DocumentElement.backup) {
+                        $backups = $response.DocumentElement.backup
+                    }
+
+                    if (-not $backups) {
+                        Write-Verbose "No snapshots found for connector $connectorGuid"
+                        return
+                    }
+
+                    # Normalize to array
+                    if ($backups -isnot [System.Array]) {
+                        $backups = @($backups)
+                    }
+
+                    foreach ($backup in $backups) {
+                        # Use id if present, otherwise fall back to root
+                        $snapshotId = if ($backup.id) { $backup.id } else { $backup.root }
+                        [PSCustomObject]@{
+                            Id = $snapshotId
+                            Timestamp = $backup.tstamp
+                            Type = $backup.type
+                            Size = [long]$backup.size
+                            Account = $backup.account
+                            ConnectorGuid = $connectorGuid
+                            ConnectorName = $resolved.Name
+                        }
+                    }
+                }
+
+                'Range' {
+                    # PUT /users/{userId}/devices/{deviceId}/history/range
+                    $uri = "$baseUrl/users/$userId/devices/$connectorGuid/history/range"
+                    $headers = @{
+                        'Authorization' = $authHeader
+                        'Accept' = 'application/vnd.keepit.v4+xml'
+                        'Content-Type' = 'application/xml'
+                    }
+
+                    # Handle "unlimited" vs numeric ResultSize
+                    $isUnlimited = $ResultSize -eq 'unlimited'
+                    $targetSize = if ($isUnlimited) { [int]::MaxValue } else { [int]$ResultSize }
+
+                    $allSnapshots = [System.Collections.ArrayList]::new()
+                    $currentStartDate = $StartDate
+                    $iteration = 0
+                    $maxIterations = if ($isUnlimited) { 10000 } else { [Math]::Ceiling($targetSize / 99) + 1 }
+
+                    do {
+                        $iteration++
+                        $targetDisplay = if ($isUnlimited) { 'unlimited' } else { $targetSize }
+                        Write-Verbose "Range query iteration $iteration (collected: $($allSnapshots.Count), target: $targetDisplay)"
+
+                        $startTimestamp = ConvertTo-KeepitTimestamp -DateTime $currentStartDate
+                        # API expects span as ISO8601 duration (e.g., P1D for 1 day)
+                        # Add 1 day to make EndDate inclusive (P1D from Dec 30 only covers Dec 30)
+                        $spanDays = [Math]::Ceiling(($EndDate - $currentStartDate).TotalDays) + 1
+                        if ($spanDays -lt 1) { $spanDays = 1 }
+                        $spanISO8601 = "P${spanDays}D"
+
+                        # Request items: use remaining needed if <= 99, otherwise 99 (API limit)
+                        $apiCount = if ($isUnlimited) { 99 } else { [Math]::Min($targetSize - $allSnapshots.Count, 99) }
+                        if ($apiCount -lt 1) { $apiCount = 99 }
+                        $reverseElement = if ($Reverse) { '<reverse/>' } else { '' }
+                        $requestBody = "<range><start>$startTimestamp</start><span>$spanISO8601</span><count>$apiCount</count>$reverseElement</range>"
+
+                        Write-Verbose "Fetching snapshot range from: $uri"
+                        Write-Verbose "Query: start=$startTimestamp, span=$spanISO8601, count=$apiCount, reverse=$Reverse"
+                        $response = Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -Body $requestBody -ErrorAction Stop
+
+                        # Parse response - API returns <backup> elements
+                        $backups = $null
+                        if ($response.history.backup) {
+                            $backups = $response.history.backup
+                        }
+                        elseif ($response.DocumentElement.backup) {
+                            $backups = $response.DocumentElement.backup
+                        }
+
+                        if (-not $backups) {
+                            Write-Verbose "No more snapshots found in range for connector $connectorGuid"
+                            break
+                        }
+
+                        # Normalize to array
+                        if ($backups -isnot [System.Array]) {
+                            $backups = @($backups)
+                        }
+
+                        $retrievedCount = $backups.Count
+                        Write-Verbose "Retrieved $retrievedCount snapshots in this iteration"
+
+                        # Add snapshots to collection
+                        foreach ($backup in $backups) {
+                            if (-not $isUnlimited -and $allSnapshots.Count -ge $targetSize) {
+                                break
+                            }
+                            # Use id if present, otherwise fall back to root
+                            $snapshotId = if ($backup.id) { $backup.id } else { $backup.root }
+                            [void]$allSnapshots.Add([PSCustomObject]@{
+                                Id = $snapshotId
+                                Timestamp = $backup.tstamp
+                                Type = $backup.type
+                                Size = [long]$backup.size
+                                Account = $backup.account
+                                ConnectorGuid = $connectorGuid
+                                ConnectorName = $resolved.Name
+                            })
+                        }
+
+                        # Check if we need to continue pagination
+                        if (-not $isUnlimited -and $targetSize -le 99) {
+                            break
+                        }
+                        if ($retrievedCount -lt 99) {
+                            break
+                        }
+                        if (-not $isUnlimited -and $allSnapshots.Count -ge $targetSize) {
+                            break
+                        }
+
+                        # Get the timestamp of the last snapshot and use it + 1 second as new start
+                        $lastTimestamp = $backups[-1].tstamp
+                        if ($lastTimestamp) {
+                            # Parse the timestamp and add 1 second for the next page
+                            $parsedDate = [DateTime]::Parse($lastTimestamp, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
+                            $currentStartDate = $parsedDate.AddSeconds(1)
+                            Write-Verbose "Next page starts at: $(ConvertTo-KeepitTimestamp -DateTime $currentStartDate)"
+
+                            # Stop if we've walked past the end date
+                            if ($currentStartDate -gt $EndDate) {
+                                Write-Verbose "Reached end date, stopping pagination"
+                                break
+                            }
+                        }
+                        else {
+                            Write-Verbose "Could not determine last timestamp, stopping pagination"
+                            break
+                        }
+
+                    } while ($iteration -lt $maxIterations)
+
+                    Write-Verbose "Total snapshots collected: $($allSnapshots.Count)"
+
+                    # Output all collected snapshots
+                    foreach ($snapshot in $allSnapshots) {
+                        $snapshot
+                    }
+                }
+
+                'Count' {
+                    $headers = @{
+                        'Authorization' = $authHeader
+                        'Accept' = 'application/vnd.keepit.v4+xml'
+                        'Content-Type' = 'application/xml'
+                    }
+
+                    # Handle "unlimited" vs numeric ResultSize
+                    $isUnlimited = $ResultSize -eq 'unlimited'
+                    $targetSize = if ($isUnlimited) { [int]::MaxValue } else { [int]$ResultSize }
+
+                    if (-not $isUnlimited -and $targetSize -le 99) {
+                        # Simple case: single API call to count endpoint
+                        $uri = "$baseUrl/users/$userId/devices/$connectorGuid/history/count"
+
+                        $startTimestamp = ConvertTo-KeepitTimestamp -DateTime $StartDate
+                        # Add 1 day to make EndDate inclusive (P1D from Dec 30 only covers Dec 30)
+                        $spanDays = [Math]::Ceiling(($EndDate - $StartDate).TotalDays) + 1
+                        if ($spanDays -lt 1) { $spanDays = 1 }
+                        $spanISO8601 = "P${spanDays}D"
+
+                        $requestBody = "<range><start>$startTimestamp</start><span>$spanISO8601</span><count>$targetSize</count></range>"
+
+                        Write-Verbose "Fetching snapshot count from: $uri"
+                        Write-Verbose "Query: start=$startTimestamp, span=$spanISO8601, count=$targetSize"
+                        $response = Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -Body $requestBody -ErrorAction Stop
+
+                        $count = if ($response.history.count) {
+                            [int]$response.history.count
+                        }
+                        elseif ($response.count) {
+                            [int]$response.count
+                        }
+                        else {
+                            0
+                        }
+
+                        [PSCustomObject]@{
+                            ConnectorGuid = $connectorGuid
+                            ConnectorName = $resolved.Name
+                            StartDate = $StartDate
+                            EndDate = $EndDate
+                            Count = $count
+                        }
+                    }
+                    else {
+                        # Pagination required: use range endpoint to count
+                        $uri = "$baseUrl/users/$userId/devices/$connectorGuid/history/range"
+                        $totalCount = 0
+                        $currentStartDate = $StartDate
+                        $iteration = 0
+                        $maxIterations = if ($isUnlimited) { 10000 } else { [Math]::Ceiling($targetSize / 99) + 1 }
+
+                        do {
+                            $iteration++
+                            $targetDisplay = if ($isUnlimited) { 'unlimited' } else { $targetSize }
+                            Write-Verbose "Count query iteration $iteration (counted: $totalCount, target: $targetDisplay)"
+
+                            $startTimestamp = ConvertTo-KeepitTimestamp -DateTime $currentStartDate
+                            # Add 1 day to make EndDate inclusive (P1D from Dec 30 only covers Dec 30)
+                            $spanDays = [Math]::Ceiling(($EndDate - $currentStartDate).TotalDays) + 1
+                            if ($spanDays -lt 1) { $spanDays = 1 }
+                            $spanISO8601 = "P${spanDays}D"
+
+                            $requestBody = "<range><start>$startTimestamp</start><span>$spanISO8601</span><count>99</count></range>"
+
+                            Write-Verbose "Fetching snapshot range for counting from: $uri"
+                            Write-Verbose "Query: start=$startTimestamp, span=$spanISO8601, count=99"
+                            $response = Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -Body $requestBody -ErrorAction Stop
+
+                            # Parse response
+                            $backups = $null
+                            if ($response.history.backup) {
+                                $backups = $response.history.backup
+                            }
+                            elseif ($response.DocumentElement.backup) {
+                                $backups = $response.DocumentElement.backup
+                            }
+
+                            if (-not $backups) {
+                                Write-Verbose "No more snapshots found for counting"
+                                break
+                            }
+
+                            # Normalize to array
+                            if ($backups -isnot [System.Array]) {
+                                $backups = @($backups)
+                            }
+
+                            $retrievedCount = $backups.Count
+                            # For unlimited, count everything; otherwise limit to remaining needed
+                            $countToAdd = if ($isUnlimited) {
+                                $retrievedCount
+                            } else {
+                                $remainingNeeded = $targetSize - $totalCount
+                                [Math]::Min($retrievedCount, $remainingNeeded)
+                            }
+                            $totalCount += $countToAdd
+
+                            Write-Verbose "Retrieved $retrievedCount snapshots, added $countToAdd to count (total: $totalCount)"
+
+                            # Check if we need to continue
+                            if ($retrievedCount -lt 99) {
+                                break
+                            }
+                            if (-not $isUnlimited -and $totalCount -ge $targetSize) {
+                                break
+                            }
+
+                            # Get the timestamp of the last snapshot and use it + 1 second as new start
+                            $lastTimestamp = $backups[-1].tstamp
+                            if ($lastTimestamp) {
+                                $parsedDate = [DateTime]::Parse($lastTimestamp, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
+                                $currentStartDate = $parsedDate.AddSeconds(1)
+                                Write-Verbose "Next page starts at: $(ConvertTo-KeepitTimestamp -DateTime $currentStartDate)"
+
+                                if ($currentStartDate -gt $EndDate) {
+                                    Write-Verbose "Reached end date, stopping pagination"
+                                    break
+                                }
+                            }
+                            else {
+                                Write-Verbose "Could not determine last timestamp, stopping pagination"
+                                break
+                            }
+
+                        } while ($iteration -lt $maxIterations)
+
+                        Write-Verbose "Total count: $totalCount"
+
+                        [PSCustomObject]@{
+                            ConnectorGuid = $connectorGuid
+                            ConnectorName = $resolved.Name
+                            StartDate = $StartDate
+                            EndDate = $EndDate
+                            Count = $totalCount
+                        }
+                    }
+                }
+            }
+        }
+        catch {
+            throw "Failed to retrieve snapshots for connector $connectorGuid : $($_.Exception.Message)"
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Gets backup and restore jobs for a Keepit connector
+.DESCRIPTION
+    Retrieves jobs (backup and restore) for a specified Keepit connector.
+    By default, shows active jobs (currently running) and future jobs (scheduled to run).
+    Completed jobs from the past are excluded unless an explicit date range is specified. If a date range
+    is specified, the cmdlet will return the job history for the specified time range and connector.
+    Results can be optionally filtered by job type and date range.
+.PARAMETER Connector
+    The connector name or GUID to retrieve jobs for.
+    Can be piped from Get-KeepitConnector.
+.PARAMETER Type
+    Optional job type filter. Valid values: 'backup', 'restore'.
+    If not specified, returns all job types.
+.PARAMETER StartDate
+    Optional start date for filtering jobs. If specified, EndDate must also be provided.
+    When StartDate and EndDate are provided, the default future-only filter is disabled
+    and all jobs within the date range are returned.
+    Jobs are filtered based on their Start time (or Scheduled time if Start is not available).
+    Only jobs with dates on or after StartDate are included.
+.PARAMETER EndDate
+    Optional end date for filtering jobs. If specified, StartDate must also be provided.
+    When StartDate and EndDate are provided, the default future-only filter is disabled
+    and all jobs within the date range are returned.
+    Jobs are filtered based on their Start time (or Scheduled time if Start is not available).
+    Only jobs with dates on or before EndDate are included.
+.EXAMPLE
+    Get-KeepitJobs -Connector "Production M365"
+
+    Gets active and future jobs for the connector named "Production M365"
+.EXAMPLE
+    Get-KeepitJobs -Connector "abc123-def456" -Type backup
+
+    Gets only active and future backup jobs for the connector
+.EXAMPLE
+    Get-KeepitJobs -Connector "abc123" -StartDate (Get-Date).AddDays(-7) -EndDate (Get-Date)
+
+    Gets all jobs from the last 7 days
+.EXAMPLE
+    Get-KeepitJobs -Connector "abc123" -Type restore -StartDate "2025-12-01" -EndDate "2025-12-21"
+
+    Gets only restore jobs between December 1 and December 21, 2025
+.EXAMPLE
+    Get-KeepitJobs -Connector "abc123" -StartDate "2025-12-15" -EndDate "2025-12-15"
+
+    Gets all jobs for a single day (December 15, 2025). The range is automatically expanded to cover 00:00:00 to 23:59:59.
+.EXAMPLE
+    Get-KeepitConnector | Get-KeepitJobs
+
+    Gets all jobs for all connectors
+.EXAMPLE
+    Get-KeepitConnector | Get-KeepitJobs -Type restore | Where-Object { $_.Active -eq $true }
+
+    Gets all active restore jobs across all connectors
+.OUTPUTS
+    PSCustomObject containing job details with properties:
+        - JobGuid: The job GUID
+        - ConnectorGuid: The connector GUID
+        - Type: Job type (backup or restore)
+        - Description: Job description
+        - Active: Boolean indicating if job is active
+        - Priority: Job priority
+        - Scheduled: Scheduled start time
+        - Start: Actual start time
+        - End: Completion time (if completed)
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+    Accepts connector objects from Get-KeepitConnector via pipeline.
+    DEFAULT BEHAVIOR: Shows active jobs (currently running) and future jobs (scheduled to run).
+    - Active jobs are always included regardless of when they started
+    - Future jobs are included if Start or Scheduled time is greater than current time
+    - Completed jobs from the past are excluded
+    To see all jobs including completed past jobs, specify a date range using StartDate and EndDate.
+    Date filtering uses Start time if available, falls back to Scheduled time.
+    Jobs without Start or Scheduled times are excluded by the default filter.
+    StartDate and EndDate must be provided together - one cannot be specified without the other.
+    If StartDate and EndDate are the same day, the range is expanded to cover the full day (00:00:00 to 23:59:59).
+#>
+function Get-KeepitJobs {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('ConnectorGuid', 'Name')]
+        [string]$Connector,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('backup', 'restore')]
+        [string]$Type,
+
+        [Parameter(Mandatory = $false)]
+        [DateTime]$StartDate,
+
+        [Parameter(Mandatory = $false)]
+        [DateTime]$EndDate
+    )
+
+    begin {
+        Write-Verbose "Get-KeepitJobs"
+
+        # Validate date parameters
+        $hasStartDate = $PSBoundParameters.ContainsKey('StartDate')
+        $hasEndDate = $PSBoundParameters.ContainsKey('EndDate')
+
+        if ($hasStartDate -and -not $hasEndDate) {
+            throw "StartDate specified without EndDate. Both StartDate and EndDate must be provided together."
+        }
+
+        if ($hasEndDate -and -not $hasStartDate) {
+            throw "EndDate specified without StartDate. Both StartDate and EndDate must be provided together."
+        }
+
+        if ($hasStartDate -and $hasEndDate) {
+            # Handle same-day search - expand to full day
+            if ($StartDate.Date -eq $EndDate.Date) {
+                Write-Verbose "StartDate and EndDate are the same date - expanding to full day"
+                $StartDate = $StartDate.Date  # Midnight start
+                $EndDate = $EndDate.Date.AddDays(1).AddSeconds(-1)  # 23:59:59
+                Write-Verbose "Expanded range: $($StartDate.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)) to $($EndDate.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture))"
+            }
+            elseif ($StartDate -ge $EndDate) {
+                throw "StartDate must be less than EndDate. StartDate: $StartDate, EndDate: $EndDate"
+            }
+            Write-Verbose "Date range filter: $StartDate to $EndDate"
+            $useFutureFilter = $false
+        }
+        else {
+            # No dates specified - default to showing active jobs and future jobs
+            $useFutureFilter = $true
+            $currentTime = [DateTime]::UtcNow
+            Write-Verbose "No date range specified - filtering for active jobs and jobs scheduled in the future (after $currentTime)"
+        }
+
+        # Get authentication header and base URL once for all pipeline items
+        try {
+            $authHeader = Get-AuthHeader
+            $baseUrl = Get-KeepitBaseUrl
+            Write-Verbose "Base URL: $baseUrl"
+
+            $userId = Get-KeepitUserId -AuthHeader $authHeader -BaseUrl $baseUrl
+            Write-Verbose "User ID: $userId"
+            Write-Verbose "Initialization completed successfully"
+        }
+        catch {
+            throw "Failed to initialize: $($_.Exception.Message)"
+        }
+    }
+
+    process {
+        try {
+            # Resolve connector identity to GUID
+            $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $connectorGuid = $resolved.ConnectorGuid
+            Write-Verbose "=== Get-KeepitJobs: Processing Connector ==="
+            Write-Verbose "Connector: $($resolved.Name) ($connectorGuid)"
+            if ($PSBoundParameters.ContainsKey('Type')) {
+                Write-Verbose "Job Type Filter: $Type"
+            }
+            else {
+                Write-Verbose "Job Type Filter: None (all types)"
+            }
+            if ($hasStartDate -and $hasEndDate) {
+                Write-Verbose "Date Range Filter: $StartDate to $EndDate"
+            }
+
+            # Build request
+            $uri = "$baseUrl/users/$userId/devices/$connectorGuid/jobs"
+            $headers = @{
+                'Authorization' = $authHeader
+                'Content-Type' = 'application/xml'
+                'active-jobs-only' = 'false'
+            }
+
+            Write-Verbose "=== API Request Details ==="
+            Write-Verbose "Method: GET"
+            Write-Verbose "URI: $uri"
+            Write-Verbose "active-jobs-only: false (retrieving all jobs)"
+
+            Write-Verbose "=== Sending API Request ==="
+
+            # Make API call
+            $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+
+            Write-Verbose "=== API Response Received ==="
+            Write-Verbose "Response Type: $($response.GetType().FullName)"
+
+            # Parse response
+            Write-Verbose "Parsing jobs from response..."
+            $jobs = @()
+
+            if ($response.jobs.job) {
+                # Normalize to array
+                if ($response.jobs.job -is [System.Array]) {
+                    $jobs = $response.jobs.job
+                    Write-Verbose "Found $($jobs.Count) jobs"
+                }
+                else {
+                    $jobs = @($response.jobs.job)
+                    Write-Verbose "Found 1 job"
+                }
+            }
+            else {
+                Write-Verbose "No jobs found in response"
+            }
+
+            # Process and output each job
+            foreach ($job in $jobs) {
+                # Apply type filter if specified
+                if ($PSBoundParameters.ContainsKey('Type') -and $job.type -ne $Type) {
+                    Write-Verbose "Skipping job $($job.guid) - type '$($job.type)' does not match filter '$Type'"
+                    continue
+                }
+
+                # Apply future filter (default behavior when no dates specified)
+                if ($useFutureFilter) {
+                    # Always include active jobs (currently running)
+                    $isActive = $job.active -eq 'true' -or $job.active -eq $true
+                    if ($isActive) {
+                        Write-Verbose "Including job $($job.guid) - job is active (currently running)"
+                    }
+                    else {
+                        # For non-active jobs, only include if scheduled for the future
+                        # Use Start time if available, fall back to Scheduled time
+                        $jobDateTime = $null
+                        if ($job.start) {
+                            $jobDateTime = [DateTime]::Parse($job.start)
+                        }
+                        elseif ($job.scheduled) {
+                            $jobDateTime = [DateTime]::Parse($job.scheduled)
+                        }
+
+                        if ($jobDateTime) {
+                            # Only include jobs scheduled for the future
+                            if ($jobDateTime -le $currentTime) {
+                                Write-Verbose "Skipping job $($job.guid) - date '$jobDateTime' is not in the future (current time: $currentTime)"
+                                continue
+                            }
+                        }
+                        else {
+                            # No date available - skip jobs without scheduled times when using future filter
+                            Write-Verbose "Skipping job $($job.guid) - no Start or Scheduled date available for future filtering"
+                            continue
+                        }
+                    }
+                }
+                # Apply date range filter if specified
+                elseif ($hasStartDate -and $hasEndDate) {
+                    # Use Start time if available, fall back to Scheduled time
+                    $jobDateTime = $null
+                    if ($job.start) {
+                        $jobDateTime = [DateTime]::Parse($job.start)
+                    }
+                    elseif ($job.scheduled) {
+                        $jobDateTime = [DateTime]::Parse($job.scheduled)
+                    }
+
+                    if ($jobDateTime) {
+                        if ($jobDateTime -lt $StartDate -or $jobDateTime -gt $EndDate) {
+                            Write-Verbose "Skipping job $($job.guid) - date '$jobDateTime' is outside range $StartDate to $EndDate"
+                            continue
+                        }
+                    }
+                    else {
+                        # No date available to filter on, skip this job
+                        Write-Verbose "Skipping job $($job.guid) - no Start or Scheduled date available for filtering"
+                        continue
+                    }
+                }
+
+                $jobObject = [PSCustomObject]@{
+                    JobGuid = if ($job.guid) { $job.guid } else { $null }
+                    ConnectorGuid = $connectorGuid
+                    ConnectorName = $resolved.Name
+                    Type = if ($job.type) { $job.type } else { 'unknown' }
+                    Description = if ($job.description) { $job.description } else { '' }
+                    Active = if ($job.active -eq $true -or $job.active -eq 'true') { $true } else { $false }
+                    Priority = if ($job.priority) { $job.priority } else { $null }
+                    Scheduled = if ($job.scheduled) { $job.scheduled } else { $null }
+                    Start = if ($job.start) { $job.start } else { $null }
+                    End = if ($job.end) { $job.end } else { $null }
+                }
+
+                Write-Verbose "Outputting job: $($jobObject.JobGuid) (Type: $($jobObject.Type), Active: $($jobObject.Active))"
+                $jobObject
+            }
+
+            Write-Verbose "=== End Get-KeepitJobs ==="
+        }
+        catch {
+            throw "Failed to retrieve jobs for connector $connectorGuid : $($_.Exception.Message)"
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Starts a backup job on a Keepit connector
+.DESCRIPTION
+    Initiates a backup job for a specified Keepit connector. The backup can be started
+    immediately or scheduled for a future time.
+.PARAMETER Connector
+    The connector name or GUID to back up.
+    Can be piped from Get-KeepitConnector.
+.EXAMPLE
+    Start-KeepitBackup -Connector "Production M365"
+
+    Starts an immediate backup for the connector named "Production M365"
+.EXAMPLE
+    Start-KeepitBackup -Connector "abc123-def456"
+
+    Starts an immediate backup for the specified connector GUID
+.EXAMPLE
+    Get-KeepitConnector | Start-KeepitBackup
+
+    Starts immediate backups for all connectors
+.OUTPUTS
+    PSCustomObject containing backup job details with properties:
+        - ConnectorGuid: The connector GUID
+        - Type: Job type (backup)
+        - Description: Job description
+        - Status: Job status ("Active", "Pending", "AlreadyQueued", or "AlreadyRunning")
+        - Scheduled: Scheduled start time
+        - Priority: Job priority
+
+    When Status is "AlreadyQueued" or "AlreadyRunning", additional properties are included:
+        - ErrorCode: The API error code ("WAITING_JOB_TO_START" or "RUNNING_JOB")
+        - ErrorMessage: The API error description
+        - ExistingJobStartTime: When the existing job started or is scheduled to start
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+    Accepts connector objects from Get-KeepitConnector via pipeline.
+
+    ERROR HANDLING: If another backup job is already queued or running on the connector,
+    the cmdlet displays a warning and returns a status object with Status = 'AlreadyQueued'
+    or 'AlreadyRunning' instead of throwing an error. This allows graceful handling when
+    automating backup operations across multiple connectors.
+#>
+function Start-KeepitBackup {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('ConnectorGuid', 'Name')]
+        [string]$Connector
+    )
+
+    begin {
+        Write-Verbose "=== Start-KeepitBackup: Initialization ==="
+        Write-Verbose "Initializing backup job operation"
+
+        # Get authentication header and base URL once for all pipeline items
+        try {
+            $authHeader = Get-AuthHeader
+            $baseUrl = Get-KeepitBaseUrl
+            Write-Verbose "Base URL: $baseUrl"
+
+            $userId = Get-KeepitUserId -AuthHeader $authHeader -BaseUrl $baseUrl
+            Write-Verbose "User ID: $userId"
+            Write-Verbose "Initialization completed successfully"
+        }
+        catch {
+            throw "Failed to initialize: $($_.Exception.Message)"
+        }
+    }
+
+    process {
+        try {
+            # Resolve connector identity to GUID
+            $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $connectorGuid = $resolved.ConnectorGuid
+            Write-Verbose "=== Start-KeepitBackup: Processing Connector ==="
+            Write-Verbose "Connector: $($resolved.Name) ($connectorGuid)"
+
+            # Build XML request body
+            $xmlBody = '<job><description>User-requested backup</description><type>backup</type>'
+                $xmlBody += '<immediate />'
+            $xmlBody += '<commands><backup /></commands></job>'
+
+            Write-Verbose "=== API Request Details ==="
+            Write-Verbose "Method: POST"
+            Write-Verbose "URI: $baseUrl/users/$userId/devices/$connectorGuid/jobs/"
+            Write-Verbose "Content-Type: application/xml"
+            Write-Verbose "Request Body:`n$xmlBody"
+
+            # Build request
+            $uri = "$baseUrl/users/$userId/devices/$connectorGuid/jobs/"
+            $headers = @{
+                'Authorization' = $authHeader
+                'Content-Type' = 'application/xml'
+            }
+
+            Write-Verbose "=== Sending API Request ==="
+
+            # Make API call with error handling
+            try {
+                $response = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $xmlBody -ErrorAction Stop
+            }
+            catch {
+                # Handle HTTP error responses
+                $errorMessage = $_.Exception.Message
+                $statusCode = $null
+                $apiError = $null
+                $errorBody = $null
+
+                # Try to extract the error response body
+                if ($_.Exception -is [Microsoft.PowerShell.Commands.HttpResponseException]) {
+                    $statusCode = $_.Exception.Response.StatusCode.value__
+                    Write-Verbose "HTTP Status Code: $statusCode"
+                }
+                elseif ($_.Exception.Response) {
+                    $statusCode = $_.Exception.Response.StatusCode.value__
+                    Write-Verbose "HTTP Status Code: $statusCode"
+                }
+
+                # Try to get error response body from ErrorDetails
+                if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+                    $errorBody = $_.ErrorDetails.Message
+                    Write-Verbose "Error response body from ErrorDetails:`n$errorBody"
+                }
+                elseif ($errorMessage -match '(?s)<error>.*?</error>') {
+                    # Fall back to extracting from error message with single-line mode
+                    $errorBody = $matches[0]
+                    Write-Verbose "Error response body from exception message:`n$errorBody"
+                }
+
+                # Try to parse error response as XML
+                if ($errorBody) {
+                    Write-Verbose "Attempting to parse error response as XML"
+                    try {
+                        $errorXml = [xml]$errorBody
+                        $apiError = [PSCustomObject]@{
+                            Code = $errorXml.error.code
+                            Description = $errorXml.error.description
+                            StartTime = $errorXml.error.'start-time'
+                        }
+                        Write-Verbose "Parsed API Error - Code: $($apiError.Code), Description: $($apiError.Description)"
+                    }
+                    catch {
+                        Write-Verbose "Could not parse error XML: $($_.Exception.Message)"
+                    }
+                }
+
+                # Handle specific error cases gracefully
+                if ($apiError -and $apiError.Code -eq 'WAITING_JOB_TO_START') {
+                    # Return a status object instead of throwing an error
+                    Write-Verbose "Handling WAITING_JOB_TO_START gracefully"
+                    Write-Warning "Cannot start backup for connector $connectorGuid - another backup job is already queued (scheduled for $($apiError.StartTime))"
+
+                    $statusObject = [PSCustomObject]@{
+                        ConnectorGuid = $connectorGuid
+                        Type = 'backup'
+                        Description = 'Job creation skipped'
+                        Status = 'AlreadyQueued'
+                        CreatedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+                        ErrorCode = $apiError.Code
+                        ErrorMessage = $apiError.Description
+                        ExistingJobStartTime = $apiError.StartTime
+                    }
+
+                    Write-Verbose "=== Job Creation Skipped ==="
+                    Write-Verbose "Reason: Another job already queued"
+                    Write-Verbose "Existing job start time: $($apiError.StartTime)"
+                    Write-Verbose "=== End Start-KeepitBackup ==="
+
+                    return $statusObject
+                }
+                elseif ($apiError -and $apiError.Code -eq 'RUNNING_JOB') {
+                    # Return a status object instead of throwing an error
+                    Write-Verbose "Handling RUNNING_JOB gracefully"
+                    Write-Warning "Cannot start backup for connector $connectorGuid - a backup job is already running (started $($apiError.StartTime))"
+
+                    $statusObject = [PSCustomObject]@{
+                        ConnectorGuid = $connectorGuid
+                        Type = 'backup'
+                        Description = 'Job creation skipped'
+                        Status = 'AlreadyRunning'
+                        CreatedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+                        ErrorCode = $apiError.Code
+                        ErrorMessage = $apiError.Description
+                        ExistingJobStartTime = $apiError.StartTime
+                    }
+
+                    Write-Verbose "=== Job Creation Skipped ==="
+                    Write-Verbose "Reason: Another job already running"
+                    Write-Verbose "Existing job start time: $($apiError.StartTime)"
+                    Write-Verbose "=== End Start-KeepitBackup ==="
+
+                    return $statusObject
+                }
+                elseif ($apiError) {
+                    # Build user-friendly error message for other API errors
+                    $friendlyMessage = "API Error [$($apiError.Code)]: $($apiError.Description)"
+                    if ($apiError.StartTime) {
+                        $friendlyMessage += " (Start time: $($apiError.StartTime))"
+                    }
+                    throw $friendlyMessage
+                }
+                else {
+                    # Re-throw original error if we couldn't parse it
+                    throw
+                }
+            }
+
+            # Debug: Show raw response
+            Write-Verbose "=== API Response Received ==="
+
+            # Handle empty response (some connector types return 201 Created with no body)
+            if ($null -eq $response -or ($response -is [string] -and [string]::IsNullOrWhiteSpace($response))) {
+                Write-Verbose "API returned empty response - treating as successful job submission"
+
+                $jobObject = [PSCustomObject]@{
+                    ConnectorGuid = $connectorGuid
+                    Type = 'backup'
+                    Description = 'User-requested backup'
+                    Status = 'Submitted'
+                    CreatedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+                }
+
+                Write-Verbose "=== Backup Job Submitted ==="
+                Write-Verbose "Connector: $connectorGuid"
+                Write-Verbose "Note: API did not return job details"
+                Write-Verbose "=== End Start-KeepitBackup ==="
+
+                return $jobObject
+            }
+
+            Write-Verbose "Response Type: $($response.GetType().FullName)"
+
+            if ($response -is [System.Xml.XmlDocument]) {
+                Write-Verbose "Response is XML Document"
+                Write-Verbose "Response XML Content:"
+                Write-Verbose $response.OuterXml
+            }
+            elseif ($response -is [System.Xml.XmlElement]) {
+                Write-Verbose "Response is XML Element"
+                Write-Verbose "Root Element Name: $($response.LocalName)"
+                Write-Verbose "Response XML Content:"
+                Write-Verbose $response.OuterXml
+            }
+            else {
+                Write-Verbose "Response is Object (not XML)"
+                try {
+                    Write-Verbose "Response Object (JSON):"
+                    Write-Verbose ($response | ConvertTo-Json -Depth 5)
+                }
+                catch {
+                    Write-Verbose "Could not convert response to JSON: $($_.Exception.Message)"
+                    Write-Verbose "Response String: $($response | Out-String)"
+                }
+            }
+
+            # Check if response is an error (in case Invoke-RestMethod didn't throw)
+            if ($response.error) {
+                Write-Verbose "Response contains error element - handling as API error"
+                $apiError = [PSCustomObject]@{
+                    Code = $response.error.code
+                    Description = $response.error.description
+                    StartTime = $response.error.'start-time'
+                }
+                Write-Verbose "API Error - Code: $($apiError.Code), Description: $($apiError.Description)"
+
+                # Handle specific error cases gracefully
+                if ($apiError.Code -eq 'WAITING_JOB_TO_START') {
+                    Write-Verbose "Handling WAITING_JOB_TO_START gracefully"
+                    Write-Warning "Cannot start backup for connector $connectorGuid - another backup job is already queued (scheduled for $($apiError.StartTime))"
+
+                    $statusObject = [PSCustomObject]@{
+                        ConnectorGuid = $connectorGuid
+                        Type = 'backup'
+                        Description = 'Job creation skipped'
+                        Status = 'AlreadyQueued'
+                        CreatedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+                        ErrorCode = $apiError.Code
+                        ErrorMessage = $apiError.Description
+                        ExistingJobStartTime = $apiError.StartTime
+                    }
+
+                    Write-Verbose "=== Job Creation Skipped ==="
+                    Write-Verbose "Reason: Another job already queued"
+                    Write-Verbose "Existing job start time: $($apiError.StartTime)"
+                    Write-Verbose "=== End Start-KeepitBackup ==="
+
+                    return $statusObject
+                }
+                elseif ($apiError.Code -eq 'RUNNING_JOB') {
+                    Write-Verbose "Handling RUNNING_JOB gracefully"
+                    Write-Warning "Cannot start backup for connector $connectorGuid - a backup job is already running (started $($apiError.StartTime))"
+
+                    $statusObject = [PSCustomObject]@{
+                        ConnectorGuid = $connectorGuid
+                        Type = 'backup'
+                        Description = 'Job creation skipped'
+                        Status = 'AlreadyRunning'
+                        CreatedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+                        ErrorCode = $apiError.Code
+                        ErrorMessage = $apiError.Description
+                        ExistingJobStartTime = $apiError.StartTime
+                    }
+
+                    Write-Verbose "=== Job Creation Skipped ==="
+                    Write-Verbose "Reason: Another job already running"
+                    Write-Verbose "Existing job start time: $($apiError.StartTime)"
+                    Write-Verbose "=== End Start-KeepitBackup ==="
+
+                    return $statusObject
+                }
+                else {
+                    # Build user-friendly error message for other API errors
+                    $friendlyMessage = "API Error [$($apiError.Code)]: $($apiError.Description)"
+                    if ($apiError.StartTime) {
+                        $friendlyMessage += " (Start time: $($apiError.StartTime))"
+                    }
+                    throw $friendlyMessage
+                }
+            }
+
+            # Parse response
+            Write-Verbose "Attempting to parse response structure..."
+            $job = if ($response.job) {
+                Write-Verbose "Found response.job element"
+                $response.job
+            }
+            elseif ($response.jobs.job) {
+                Write-Verbose "Found response.jobs.job element"
+                if ($response.jobs.job -is [System.Array]) {
+                    Write-Verbose "response.jobs.job is an array, taking first element"
+                    $response.jobs.job[0]
+                }
+                else {
+                    Write-Verbose "response.jobs.job is a single object"
+                    $response.jobs.job
+                }
+            }
+            else {
+                Write-Verbose "ERROR: Could not find job in response. Available properties:"
+                $response | Get-Member -MemberType Properties | ForEach-Object {
+                    Write-Verbose "  - $($_.Name): $($response.($_.Name))"
+                }
+                throw "Unexpected response structure from API. Expected 'job' or 'jobs.job' element. See verbose output for details."
+            }
+
+            Write-Verbose "Successfully parsed job. JobGuid: $($job.guid)"
+
+            # Create and output job object
+            $jobObject = [PSCustomObject]@{
+                ConnectorGuid = $connectorGuid
+                Type = if ($job.type) { $job.type } else { 'backup' }
+                Description = if ($job.description) { $job.description } else { 'User-requested backup' }
+                Status = if ($job.active -eq $true -or $job.active -eq 'true') { 'Active' } else { 'Pending' }
+                CreatedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+            }
+
+            Write-Verbose "=== Job Created Successfully ==="
+            Write-Verbose "Type: $($jobObject.Type)"
+            Write-Verbose "Status: $($jobObject.Status)"
+            Write-Verbose "CreatedAt: $($jobObject.CreatedAt)"
+            Write-Verbose "=== End Start-KeepitBackup ==="
+
+            $jobObject
+        }
+        catch {
+            throw "Failed to start backup job for connector $connectorGuid : $($_.Exception.Message)"
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Submits a backup or restore job to a Keepit connector
+.DESCRIPTION
+    Submits a job to the Keepit API using an XML configuration blob. This is a low-level
+    cmdlet that accepts raw XML job configuration, allowing full control over job parameters.
+    For common backup operations, consider using Start-KeepitBackup instead.
+.PARAMETER Connector
+    The connector name or GUID to submit the job against.
+    Can be piped from Get-KeepitConnector.
+.PARAMETER Configuration
+    An XML blob specifying the job contents. The XML structure depends on the job type.
+    Maximum 64K length.
+
+    Example for a restore job:
+    <job>
+        <description>Restore deleted items</description>
+        <type>restore</type>
+        <immediate />
+        <commands>
+            <restore>
+                <source path="/Users/guid/Outlook/Inbox" snaptime="20241201T120000Z" />
+                <destination path="/Users/guid/Outlook/Restored" />
+            </restore>
+        </commands>
+    </job>
+.EXAMPLE
+    $xml = '<job><description>Test restore</description><type>restore</type><immediate /><commands><restore /></commands></job>'
+    Submit-KeepitJob -Connector "abc123-def456" -Configuration $xml
+
+    Submits a restore job with the specified XML configuration
+.EXAMPLE
+    $config = Get-Content -Path "restore-job.xml" -Raw
+    Submit-KeepitJob -Connector "Production M365" -Configuration $config
+
+    Submits a job using configuration from a file
+.EXAMPLE
+    Get-KeepitConnector -Connector "Production" | Submit-KeepitJob -Configuration $xml
+
+    Submits a job to a connector found by name via pipeline
+.OUTPUTS
+    PSCustomObject containing job details with properties:
+        - JobGuid: The GUID of the created job
+        - ConnectorGuid: The connector GUID
+        - Status: Job status (e.g., "created", "pending", "active")
+        - CreatedAt: Timestamp when the job was created
+        - EstimatedItems: Estimated number of items (if available)
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+    This cmdlet posts to the jobs API endpoint using application/xml content type.
+    The API response is parsed to extract job details from either job or jobs.job structure.
+#>
+function Submit-KeepitJob {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('ConnectorGuid', 'Name')]
+        [string]$Connector,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [ValidateScript({
+            if ($_.Length -gt 65536) {
+                throw "Configuration XML exceeds maximum length of 64K"
+            }
+            # Basic XML validation
+            try {
+                [xml]$_ | Out-Null
+                return $true
+            }
+            catch {
+                throw "Configuration must be valid XML: $($_.Exception.Message)"
+            }
+        })]
+        [string]$Configuration
+    )
+
+    begin {
+        Write-Verbose "=== Submit-KeepitJob: Initialization ==="
+
+        # Get authentication header and base URL once for all pipeline items
+        try {
+            $authHeader = Get-AuthHeader
+            $baseUrl = Get-KeepitBaseUrl
+            $userId = Get-KeepitUserId -AuthHeader $authHeader -BaseUrl $baseUrl
+            Write-Verbose "Base URL: $baseUrl, User ID: $userId"
+        }
+        catch {
+            throw "Failed to initialize: $($_.Exception.Message)"
+        }
+    }
+
+    process {
+        try {
+            # Resolve connector identity to GUID
+            $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $connectorGuid = $resolved.ConnectorGuid
+
+            Write-Verbose "=== Submit-KeepitJob: Processing ==="
+            Write-Verbose "Connector: $($resolved.Name) ($connectorGuid)"
+            Write-Verbose "Configuration length: $($Configuration.Length) characters"
+
+            # Build request URI (matches Bohr's getRestoreJobSettings)
+            $uri = "$baseUrl/users/$userId/devices/$connectorGuid/jobs/"
+
+            # Headers matching Bohr implementation
+            $headers = @{
+                'Authorization' = $authHeader
+                'Content-Type'  = 'application/xml'
+                'Accept'        = 'application/vnd.keepit.v4+xml'
+            }
+
+            Write-Verbose "=== API Request ==="
+            Write-Verbose "Method: POST"
+            Write-Verbose "URI: $uri"
+            Write-Verbose "Content-Type: application/xml"
+            Write-Verbose "Accept: application/vnd.keepit.v4+xml"
+            Write-Verbose "Request Body:`n$Configuration"
+
+            # Make API call using Invoke-WebRequest for raw response handling
+            $webResponse = Invoke-WebRequest -Uri $uri -Method Post -Headers $headers -Body $Configuration -ErrorAction Stop
+            $rawContent = $webResponse.Content
+
+            Write-Verbose "=== API Response ==="
+            Write-Verbose "Status Code: $($webResponse.StatusCode)"
+            Write-Verbose "Content-Type: $($webResponse.Headers.'Content-Type')"
+            Write-Verbose "Response Body:`n$rawContent"
+
+            # Parse response - try XML first (matching Bohr's applyDataCallback logic)
+            $jobGuid = $null
+            $status = 'created'
+            $createdAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+            $estimatedItems = 0
+
+            try {
+                $responseXml = [xml]$rawContent
+
+                # Check for job structure (matches Bohr: jsonData?.job)
+                if ($responseXml.job) {
+                    $job = $responseXml.job
+                    $jobGuid = if ($job.guid) { $job.guid } else { $null }
+                    $status = if ($job.status) { $job.status } else { 'created' }
+                    $createdAt = if ($job.created) { $job.created } else { $createdAt }
+                    if ($job.'estimated-items') {
+                        $estimatedItems = [int]$job.'estimated-items'
+                    }
+                    Write-Verbose "Parsed job from response.job"
+                }
+                # Check for jobs.job structure (matches Bohr: jsonData?.jobs?.job)
+                elseif ($responseXml.jobs.job) {
+                    $jobNode = $responseXml.jobs.job
+                    # Handle array case
+                    $job = if ($jobNode -is [System.Array]) { $jobNode[0] } else { $jobNode }
+                    $jobGuid = if ($job.guid) { $job.guid } else { $null }
+                    $status = if ($job.status) { $job.status } else { 'created' }
+                    $createdAt = if ($job.created) { $job.created } else { $createdAt }
+                    if ($job.'estimated-items') {
+                        $estimatedItems = [int]$job.'estimated-items'
+                    }
+                    Write-Verbose "Parsed job from response.jobs.job"
+                }
+                else {
+                    Write-Verbose "Could not find job or jobs.job in response, using defaults"
+                }
+            }
+            catch {
+                Write-Verbose "Could not parse response as XML: $($_.Exception.Message)"
+            }
+
+            # If we still don't have a job GUID, generate a placeholder
+            if (-not $jobGuid) {
+                $jobGuid = "job-$(Get-Date -Format 'yyyyMMddHHmmss')"
+                Write-Verbose "Generated placeholder job GUID: $jobGuid"
+            }
+
+            # Create output object
+            $result = [PSCustomObject]@{
+                JobGuid        = $jobGuid
+                ConnectorGuid  = $connectorGuid
+                Status         = $status
+                CreatedAt      = $createdAt
+                EstimatedItems = $estimatedItems
+            }
+
+            Write-Verbose "=== Job Submitted Successfully ==="
+            Write-Verbose "JobGuid: $($result.JobGuid)"
+            Write-Verbose "Status: $($result.Status)"
+            Write-Verbose "CreatedAt: $($result.CreatedAt)"
+            Write-Verbose "EstimatedItems: $($result.EstimatedItems)"
+
+            $result
+        }
+        catch {
+            # Handle HTTP errors
+            $errorMessage = $_.Exception.Message
+            $errorBody = $null
+
+            if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+                $errorBody = $_.ErrorDetails.Message
+                Write-Verbose "Error response body: $errorBody"
+
+                # Try to parse error XML for better error message
+                try {
+                    $errorXml = [xml]$errorBody
+                    if ($errorXml.error) {
+                        $errorMessage = "API Error: $($errorXml.error.code) - $($errorXml.error.description)"
+                    }
+                }
+                catch {
+                    Write-Verbose "Could not parse error response as XML"
+                }
+            }
+
+            throw "Failed to submit job for connector $connectorGuid : $errorMessage"
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Generates XML job configuration for restore operations
+.DESCRIPTION
+    Internal helper function that creates the XML job definition for restore operations,
+    selecting the appropriate configuration based on the item type being restored.
+
+    Different item types require different FolderRestoreMode settings:
+    - email: Uses DeltaAppend mode
+    - user: Uses DeltaRestore mode (for Entra ID user objects)
+    - OneDrive: Uses DeltaAppend mode (for OneDrive for Business files)
+.PARAMETER Type
+    The type of items being restored. Valid values: email, user, OneDrive
+.PARAMETER SnapshotId
+    The snapshot ID to restore from.
+.PARAMETER Items
+    Array of items to restore. Each item must have an Id property containing the kng:// path.
+.OUTPUTS
+    String containing the XML job configuration.
+.NOTES
+    This is an internal helper function not exported from the module.
+#>
+function New-RestoreJobXml {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('email', 'user', 'OneDrive')]
+        [string]$Type,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$SnapshotId,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNull()]
+        [array]$Items
+    )
+
+    # Select FolderRestoreMode based on item type
+    $folderRestoreMode = switch ($Type) {
+        'email'    { 'DeltaAppend' }
+        'user'     { 'DeltaRestore' }
+        'OneDrive' { 'DeltaAppend' }
+    }
+
+    # Build RestorePaths element with one Path per item
+    # Strip kng://connector-guid prefix from item ID to get just the path
+    $pathElements = ($Items | ForEach-Object {
+        $itemPath = $_.Id -replace '^kng://[^/]+', ''
+        "<Path>$itemPath</Path>"
+    }) -join ''
+
+    # Generate the XML job configuration
+    $xmlConfig = @"
+<job><description>[srestore] [KeepitPSTools][$Type] Bulk restore of $($Items.Count) items</description><type>srestore</type><immediate/><priority>1</priority><commands><restore><RestoreConfig><SnapshotId>$SnapshotId</SnapshotId><Rules><Mode><FolderRestoreMode>$folderRestoreMode</FolderRestoreMode><FileConflictResolutionMode>Restore</FileConflictResolutionMode><Method>InPlace</Method></Mode><RestorePaths>$pathElements</RestorePaths></Rules></RestoreConfig></restore></commands></job>
+"@
+
+    return $xmlConfig
+}
+
+<#
+.SYNOPSIS
+    Restores bulk deleted items from Keepit backups
+.DESCRIPTION
+    Searches for deleted items in a specified date range and submits restore jobs to recover them.
+    Items are grouped by their snapshot timestamp, and one restore job is submitted per snapshot.
+    Currently supports email and user item types.
+
+.PARAMETER UserPrincipalName
+    The User Principal Name (UPN) or GUID of the user whose account or items should be restored.
+    If a UPN is provided, it will be converted to a GUID using Convert-KeepitUPNToGuid.
+    Accepts pipeline input by property name.
+    Aliases: UPN, Email, UserId
+.PARAMETER Connector
+    The connector name or GUID to use for the restore operation.
+    Can be piped from Get-KeepitConnector.
+.PARAMETER RootPath
+    The folder path to search from deleted items, relative to the user's Outlook folder.
+    Examples: "Inbox", "Calendar", "Deleted Items"
+    This will be expanded to: /Users/{userGuid}/Outlook/{RootPath} for mail items
+.PARAMETER RestorePath
+    The folder path to restore items to. Currently not implemented - items are restored
+    in-place to their original location. A warning will be displayed if this parameter is used.
+.PARAMETER StartDate
+    The start of the date range for searching deleted items.
+.PARAMETER EndDate
+    The end of the date range for searching deleted items. Must be after StartDate. If you specify StartDate and EndDate as equal, the restore will include items from midnight on the start date until midnight on the following day.
+.PARAMETER Type
+    The type of items to restore. Valid values: email, user, OneDrive.
+    Default is "email".
+.PARAMETER Recursive
+    Search recursively in subfolders of RootPath.
+    By default, searches only the immediate RootPath. Use -Recursive to include subfolders. Not available when restoring mail.
+.PARAMETER ShowJobs
+    When specified, prints the XML job configuration blob for each restore job.
+    Works with both -WhatIf (to see what would be submitted) and normal execution (to see what was submitted).
+.EXAMPLE
+    Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "Production M365" -RootPath "Inbox" -StartDate "2026-01-01" -EndDate "2026-01-15"
+
+    Restores all deleted items from the user's Inbox for the period 1-15 January 2026
+.EXAMPLE
+    Import-Csv users.csv | Restore-KeepitBulkDeletedItems -Connector "abc123-def456" -RootPath "Inbox" -StartDate "2026-01-01" -EndDate "2026-01-15"
+
+    Restores deleted items for multiple users from a CSV file with UserPrincipalName, UPN, or Email column
+.EXAMPLE
+    Restore-KeepitBulkDeletedItems -UPN "user@example.com" -Connector "Production M365" -RootPath "Deleted Items" -StartDate (Get-Date).AddDays(-30) -EndDate (Get-Date) -WhatIf
+
+    Shows what would be restored from the Deleted Items folder for the last 30 days without actually restoring
+.OUTPUTS
+    With -WhatIf: PSCustomObject with properties (jobs are NOT submitted):
+        - TotalItems: Total number of items that would be restored
+        - JobCount: Number of restore jobs that would be created
+        - ItemsBySnapshot: Hashtable showing item counts per snapshot timestamp
+
+    Without -WhatIf: Array of PSCustomObjects containing job results (jobs ARE submitted):
+        - JobGuid: The GUID of the created restore job
+        - ConnectorGuid: The connector GUID
+        - SnapshotId: The snapshot ID used for this restore
+        - SnapshotTime: The snapshot timestamp
+        - ItemCount: Number of items in this restore job
+        - Status: Job status
+        - CreatedAt: Timestamp when the job was created
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+    Items are restored in-place to their original location.
+    One restore job is created per unique snapshot timestamp to optimize the restore process.
+#>
+function Restore-KeepitBulkDeletedItems {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('UPN', 'Email', 'UserId')]
+        [string]$UserPrincipalName,
+
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('ConnectorGuid', 'Name')]
+        [string]$Connector,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$RootPath,
+
+        [Parameter(Mandatory = $false)]
+        [string]$RestorePath,
+
+        [Parameter(Mandatory = $true)]
+        [DateTime]$StartDate,
+
+        [Parameter(Mandatory = $true)]
+        [DateTime]$EndDate,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('email', 'user', 'OneDrive')]
+        [string]$Type = 'email',
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Recursive,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ShowJobs
+    )
+
+    begin {
+        Write-Verbose "=== Restore-KeepitBulkDeletedItems: Initialization ==="
+
+        # Validate date range (allow same-day for whole-day searches)
+        if ($EndDate -lt $StartDate) {
+            throw "EndDate cannot be before StartDate. StartDate: $($StartDate.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), EndDate: $($EndDate.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
+        }
+
+        # Handle same-day search - expand to full day
+        if ($StartDate.Date -eq $EndDate.Date) {
+            Write-Verbose "StartDate and EndDate are the same date - expanding to full day"
+            $StartDate = $StartDate.Date  # Midnight start
+            $EndDate = $EndDate.Date.AddDays(1).AddSeconds(-1)  # 23:59:59
+            Write-Verbose "Expanded range: $($StartDate.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)) to $($EndDate.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture))"
+        }
+
+        # Warn about RestorePath not being implemented
+        if ($RestorePath) {
+            Write-Warning "RestorePath parameter is not yet implemented. Items will be restored in-place to their original location."
+        }
+
+        # Validate Type; for now we only support email, ODB, and user
+        if ($Type -notin @('email', 'user', 'OneDrive')) {
+            throw "Only 'email', 'OneDrive', and 'user' types are currently supported. "
+        }
+
+        # Get authentication header and base URL
+        try {
+            $authHeader = Get-AuthHeader
+            $baseUrl = Get-KeepitBaseUrl
+            $userId = Get-KeepitUserId -AuthHeader $authHeader -BaseUrl $baseUrl
+            Write-Verbose "Base URL: $baseUrl, User ID: $userId"
+        }
+        catch {
+            throw "Failed to initialize: $($_.Exception.Message)"
+        }
+    }
+
+    process {
+        try {
+            # Resolve connector identity to GUID
+            $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $connectorGuid = $resolved.ConnectorGuid
+
+            Write-Verbose "=== Restore-KeepitBulkDeletedItems: Processing ==="
+            Write-Verbose "UserPrincipalName: $UserPrincipalName"
+            Write-Verbose "Connector: $($resolved.Name) ($connectorGuid)"
+            Write-Verbose "RootPath: $RootPath"
+            Write-Verbose "StartDate: $StartDate"
+            Write-Verbose "EndDate: $EndDate"
+            Write-Verbose "Type: $Type"
+
+            # Step 1: Convert UserPrincipalName to GUID if needed (for email type only)
+            # For user type, we filter by UPN in the Title field instead, since the user may have been
+            # recreated with a new GUID after deletion
+            $userGuid = $UserPrincipalName
+            if ($Type -ne 'user' -and $UserPrincipalName -match '@') {
+                Write-Verbose "UserPrincipalName appears to be a UPN, converting to GUID..."
+                $guidResult = Convert-KeepitUPNToGuid -UserPrincipalName $UserPrincipalName -Connector $connectorGuid
+                if (-not $guidResult -or -not $guidResult.Guid) {
+                    throw "Failed to convert UPN '$UserPrincipalName' to GUID. User may not exist in the backup."
+                }
+                $userGuid = $guidResult.Guid
+                Write-Verbose "Converted UPN to GUID: $userGuid"
+            }
+
+            # Step 2: Construct the pathroot, removing leading/trailing slashes
+            # If the type is 'email', as it will be by default, we can use this path. For other types, we'll have to construct the path differently.
+            $cleanRootPath = $RootPath.Trim('/')
+
+            if ($Type -eq 'email') {
+                # For email items, the path is under Outlook
+                $pathRoot = "/Users/$userGuid/Outlook/$cleanRootPath"
+            } elseif ($Type -eq 'user') {
+                # For user items, search at /Users level to find user objects
+                # Results will be filtered by UPN after search
+                $pathRoot = "/Users"
+            } elseif ($Type -eq 'OneDrive') {
+                # this is a little tricky. Some devices will have a path of /Users/{userGuid}/OneDrive, others /users/{userGuid}/OneDriveSP/DocLibs/Documents/Content
+                # there's no way for us to tell in advance which path the device / user combo will have so we will have to check both
+                # Start with the user-provided path under the user's folder
+                $pathRoot = "/Users/$userGuid/$cleanRootPath"
+            }
+            Write-Verbose "Constructed RootPath: $cleanRootPath"
+
+            # Step 3: Search for deleted items
+            Write-Verbose "Searching for deleted items..."
+            $searchParams = @{
+                Connector   = $connectorGuid
+                RootPath    = $pathRoot
+                DeletedOnly = $true
+                ResultSize  = 'Unlimited'
+                StartTime   = $StartDate
+                EndTime     = $EndDate
+            }
+            if ($Type -eq 'user') {
+                $searchParams.Recursive = $false
+            } else {
+                if ($Recursive) {
+                    $searchParams.Recursive = $true
+                }
+            }
+
+            $deletedItems = @(Search-KeepitSnapshot @searchParams)
+
+            # if we're doing OneDrive, and there were no results, this might be becaue of the path issue.
+            # if those are both true, check the path the user supplied, swap to the other style, and search again
+            if ($Type -eq 'OneDrive' -and $deletedItems.Count -eq 0) {
+                Write-Verbose "No deleted items found for OneDrive - trying alternate path format..."
+                if ($cleanRootPath -like 'OneDrive*') {
+                    # user supplied /OneDrive*, try /OneDriveSP/DocLibs/Documents/Content
+                    $altPathRoot = "/Users/$userGuid/OneDriveSP/DocLibs/Documents/Content"
+                } else {
+                    # user supplied /OneDriveSP/DocLibs/Documents/Content, try /OneDrive
+                    $altPathRoot = "/Users/$userGuid/OneDrive"
+                }
+                Write-Verbose "Trying alternate RootPath: $altPathRoot"
+                $searchParams.RootPath = $altPathRoot
+                $deletedItems = @(Search-KeepitSnapshot @searchParams)
+            }
+            Write-Verbose "Found $($deletedItems.Count) deleted items"
+
+            # For user type, filter results by UPN in the Title field
+            # This handles cases where a user was recreated with a new GUID after deletion
+            if ($Type -eq 'user') {
+                # Filter by UPN in Title (format: "Display Name - user@domain.com")
+                $deletedItems = @($deletedItems | Where-Object { $_.Title -like "*$UserPrincipalName*" })
+                Write-Verbose "After filtering for UPN '$UserPrincipalName' in Title: $($deletedItems.Count) items"
+            }
+
+            if ($deletedItems.Count -eq 0) {
+                Write-Warning "No deleted items found for user '$UserPrincipalName' in the specified date range."
+                return
+            }
+
+            # Step 4: Group items by their <updated> timestamp
+            Write-Verbose "Grouping items by snapshot timestamp..."
+            $itemsByTimestamp = @{}
+            foreach ($item in $deletedItems) {
+                # Get the updated timestamp from the item
+                $updated = $item.Updated
+                if (-not $updated) {
+                    Write-Verbose "Item $($item.Id) has no Updated timestamp, skipping"
+                    continue
+                }
+
+                if (-not $itemsByTimestamp.ContainsKey($updated)) {
+                    $itemsByTimestamp[$updated] = [System.Collections.ArrayList]::new()
+                }
+                [void]$itemsByTimestamp[$updated].Add($item)
+            }
+
+            Write-Verbose "Grouped items into $($itemsByTimestamp.Count) snapshot groups"
+
+            # Step 5: Handle WhatIf
+            if ($WhatIfPreference) {
+                $itemCounts = @{}
+                foreach ($key in $itemsByTimestamp.Keys) {
+                    $itemCounts[$key] = $itemsByTimestamp[$key].Count
+                }
+
+                $whatIfResult = [PSCustomObject]@{
+                    TotalItems      = $deletedItems.Count
+                    JobCount        = $itemsByTimestamp.Count
+                    ItemsBySnapshot = $itemCounts
+                }
+
+                Write-Host "WhatIf: Would restore $($deletedItems.Count) items in $($itemsByTimestamp.Count) restore job(s)"
+                foreach ($key in $itemsByTimestamp.Keys | Sort-Object) {
+                    Write-Host "  Snapshot $key : $($itemsByTimestamp[$key].Count) items"
+                    foreach ($item in $itemsByTimestamp[$key]) {
+                        $title = if ($item.Title) { $item.Title } else { $item.Id }
+                        Write-Host "    + $title"
+                    }
+                }
+
+                # Generate and display XML blobs for WhatIf only if ShowJobs is specified
+                if ($ShowJobs) {
+                    Write-Host ""
+                    Write-Host "XML job configurations that would be submitted:"
+                    foreach ($timestamp in $itemsByTimestamp.Keys | Sort-Object) {
+                        $items = $itemsByTimestamp[$timestamp]
+
+                        # Find the matching snapshot
+                        try {
+                            $snapshotTime = [DateTime]::Parse($timestamp)
+                        }
+                        catch {
+                            Write-Warning "Could not parse timestamp '$timestamp', skipping group"
+                            continue
+                        }
+
+                        # Search backwards from item timestamp to find the snapshot at or before this time
+                        $snapshotParams = @{
+                            Connector   = $connectorGuid
+                            StartDate   = $snapshotTime
+                            EndDate     = $snapshotTime.AddYears(-1)
+                            Reverse     = $true
+                            ResultSize  = 1
+                        }
+
+                        $snapshot = Get-KeepitSnapshot @snapshotParams | Select-Object -First 1
+
+                        if (-not $snapshot) {
+                            Write-Warning "Could not find snapshot for timestamp '$timestamp', skipping group"
+                            continue
+                        }
+
+                        $snapshotId = $snapshot.Id
+
+                        # Generate XML job configuration using helper function
+                        $xmlConfig = New-RestoreJobXml -Type $Type -SnapshotId $snapshotId -Items $items
+
+                        Write-Host ""
+                        Write-Host "Job XML for snapshot $timestamp :"
+                        $xmlConfig | Out-Host
+                    }
+                }
+
+                return $whatIfResult
+            }
+
+            # Step 6: For each group, find the matching snapshot and create restore job
+            $jobResults = [System.Collections.ArrayList]::new()
+
+            foreach ($timestamp in $itemsByTimestamp.Keys) {
+                $items = $itemsByTimestamp[$timestamp]
+                Write-Verbose "Processing snapshot group: $timestamp with $($items.Count) items"
+
+                # Find the matching snapshot
+                # Parse the timestamp and search backwards to find snapshot at or before this time
+                try {
+                    $snapshotTime = [DateTime]::Parse($timestamp)
+                }
+                catch {
+                    Write-Warning "Could not parse timestamp '$timestamp', skipping group"
+                    continue
+                }
+
+                $snapshotParams = @{
+                    Connector   = $connectorGuid
+                    StartDate   = $snapshotTime
+                    EndDate     = $snapshotTime.AddYears(-1)
+                    Reverse     = $true
+                    ResultSize  = 1
+                }
+
+                $snapshot = Get-KeepitSnapshot @snapshotParams | Select-Object -First 1
+
+                if (-not $snapshot) {
+                    Write-Warning "Could not find snapshot for timestamp '$timestamp', skipping group"
+                    continue
+                }
+
+                $snapshotId = $snapshot.Id
+                Write-Verbose "Found snapshot ID: $snapshotId"
+
+                # Step 7: Generate XML job configuration using helper function
+                $xmlConfig = New-RestoreJobXml -Type $Type -SnapshotId $snapshotId -Items $items
+
+                Write-Verbose "Created XML configuration for snapshot $snapshotId"
+                Write-Verbose "XML Config:`n$xmlConfig"
+
+                # Show XML blob if ShowJobs is specified
+                if ($ShowJobs) {
+                    Write-Host "Job XML for snapshot $timestamp :"
+                    # Use Out-Host to ensure complete XML is shown without truncation
+                    $xmlConfig | Out-Host
+                    Write-Host ""
+                }
+
+                # Step 8: Submit the job
+                if ($PSCmdlet.ShouldProcess("Connector $connectorGuid", "Submit restore job for $($items.Count) items from snapshot $timestamp")) {
+                    $submitParams = @{
+                        Connector     = $connectorGuid
+                        Configuration = $xmlConfig
+                    }
+
+                    $jobResult = Submit-KeepitJob @submitParams
+
+                    # Enhance result with additional info
+                    $enhancedResult = [PSCustomObject]@{
+                        JobGuid       = $jobResult.JobGuid
+                        ConnectorGuid = $jobResult.ConnectorGuid
+                        SnapshotId    = $snapshotId
+                        SnapshotTime  = $timestamp
+                        ItemCount     = $items.Count
+                        Status        = $jobResult.Status
+                        CreatedAt     = $jobResult.CreatedAt
+                    }
+
+                    [void]$jobResults.Add($enhancedResult)
+                    Write-Verbose "Submitted job $($jobResult.JobGuid) for $($items.Count) items"
+                }
+            }
+
+            Write-Verbose "=== Restore-KeepitBulkDeletedItems: Complete ==="
+            Write-Verbose "Submitted $($jobResults.Count) restore jobs"
+
+            # Return job results
+            $jobResults.ToArray()
+        }
+        catch {
+            throw "Failed to restore deleted items: $($_.Exception.Message)"
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Searches backup data using the Keepit BSearch API
+.DESCRIPTION
+    Performs searches against backup snapshots using the Keepit BSearch API v2.
+    Supports searching for items by path, text terms, item type, date range, and various filters.
+
+    Common use cases:
+    - Search for mail items in a user's mailbox
+    - Browse folder contents at a specific point in time
+    - Find deleted items
+    - Search across all users on a connector
+.PARAMETER Connector
+    The connector name or GUID to search.
+    Can be piped from Get-KeepitConnector.
+.PARAMETER RootPath
+    The folder path to search within. Paths are automatically masked for the API.
+    UPN support: If the path contains a UPN (e.g., /Users/user@example.com/...), it will be
+    automatically converted to the internal GUID using Convert-KeepitUPNToGuid.
+    Examples: "/Users", "/Users/user@example.com/Outlook/Inbox", "/SharePoint/SiteName"
+.PARAMETER SearchTerms
+    Text terms to search for (fuzzy search, case insensitive).
+    Use quotes for exact match: '"exact phrase"'
+    Multiple terms are space-separated.
+.PARAMETER ItemName
+    Exact filename to match. Use for retrieving history of a specific item.
+.PARAMETER ItemType
+    Filter by item type. Valid values: Audio, Video, Image, Message, Document, Folder.
+    Can specify multiple types.
+.PARAMETER FilterExpression
+    Raw filter expression for advanced filtering.
+    Format: "AND:criterion1,criterion2;OR:criterion3,criterion4"
+    Examples:
+        "AND:!deleted,!sys" - exclude deleted and system items
+        "AND:!deleted,!sys;OR:message,document" - non-deleted messages or documents
+.PARAMETER FilterMode
+    How filter groups are combined. Valid values: And, Or.
+    Default: And (uses filterAnd parameter)
+.PARAMETER IncludeDeleted
+    Include deleted items in results. By default, deleted items are excluded.
+    Cannot be used with -DeletedOnly.
+.PARAMETER DeletedOnly
+    Return only deleted items. By default, deleted items are excluded.
+    Cannot be used with -IncludeDeleted.
+.PARAMETER StartTime
+    Start of snapshot date range (ISO8601 or DateTime).
+    When StartTime and EndTime are the same date, the search covers the entire day.
+.PARAMETER EndTime
+    End of snapshot date range (ISO8601 or DateTime).
+    When StartTime and EndTime are the same date, the search covers the entire day.
+.PARAMETER Recursive
+    Search recursively in subfolders of RootPath.
+    By default, searches only the immediate RootPath. Use -Recursive to include subfolders.
+.PARAMETER ResultSize
+    Maximum number of results to return. Default is 100.
+    Use "Unlimited" to retrieve all matching results (may require multiple API calls).
+    Cannot be used with -CountOnly.
+.PARAMETER CountOnly
+    Return only the count of matching items, without returning item details.
+    Cannot be used with -ResultSize.
+.PARAMETER StartIndex
+    Index of first result for pagination. Default is 0.
+.EXAMPLE
+    Search-KeepitSnapshot -Connector "Production M365" -RootPath "/Users/user@example.com/Outlook/Inbox" -StartTime "2026-01-01" -EndTime "2026-01-31"
+
+    Find all mail messages in a user's Inbox from January 2026
+.EXAMPLE
+    Search-KeepitSnapshot -Connector "abc123-def456" -RootPath "/Users" -SearchTerms "'pro@keepit.com'"
+
+    Search for exact match "pro@keepit.com" in immediate /Users folder only (non-recursive by default)
+.EXAMPLE
+    Search-KeepitSnapshot -Connector "abc123" -RootPath "/Users/user@example.com/Outlook/Inbox" -ItemType Message -DeletedOnly -StartTime "2026-01-01" -EndTime "2026-01-05"
+
+    Search for all deleted messages for the specified user's Inbox folder during the period 1-5 January 2026
+.EXAMPLE
+    Get-KeepitConnector | Search-KeepitSnapshot -RootPath "/Users" -ItemType Folder
+
+    Search for folders in /Users path across all connectors
+.EXAMPLE
+    Search-KeepitSnapshot -Connector "abc123" -RootPath "/Users/user@example.com/Outlook" -ItemType folder -Recursive
+
+    Recursively list all folders below the specified RootPath
+.EXAMPLE
+    Search-KeepitSnapshot -Connector "abc123" -RootPath "/Users/user@example.com/Outlook" -ItemType Message -CountOnly
+
+    Get the count of messages without returning item details
+.OUTPUTS
+    Default mode - PSCustomObject[] - Array of search result objects with properties:
+        - Id: Item identifier (kng:// path)
+        - Name: Item name/filename
+        - Path: Human-readable path (if resolveIds was used)
+        - Title: Item title/subject
+        - Updated: Last update timestamp
+        - Published: Published/created timestamp
+        - Size: Item size in bytes
+        - ContentType: MIME content type
+        - ItemType: Detected item type (message, document, folder, etc.)
+        - IsDeleted: Whether the item is deleted
+        - ConnectorGuid: The connector GUID
+        - Metadata: Hashtable of additional metadata
+
+    CountOnly mode - PSCustomObject with properties:
+        - ConnectorGuid: The connector GUID
+        - RootPath: The search path
+        - SearchTerms: The search terms used (if any)
+        - Count: Total number of matching items
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+
+    PATH MASKING: Paths are automatically masked for the API where special characters
+    are escaped (: -> -c, / -> -s, - -> --). You can provide normal paths.
+
+    RESULT SIZE: When using -ResultSize Unlimited, the cmdlet makes multiple API calls
+    to retrieve all results. This may take time for large result sets.
+
+    FILTERS: The BSearch API uses a Polish notation filter syntax. Use -FilterExpression
+    for advanced filtering, or use -ItemType, -IncludeDeleted, and -DeletedOnly for common cases.
+
+    UPN CONVERSION: When RootPath contains a user path with a UPN (email address) like
+    /Users/user@example.com/Outlook, the UPN is automatically converted to the internal GUID
+    using the BSearch API. If the UPN cannot be resolved, a warning is displayed and the
+    search continues with the original path (which may return no results).
+#>
+function Search-KeepitSnapshot {
+    [CmdletBinding(DefaultParameterSetName = 'Default')]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('ConnectorGuid', 'Name')]
+        [string]$Connector,
+
+        [Parameter(Mandatory = $false)]
+        [Alias('PathRoot')]
+        [string]$RootPath,
+
+        [Parameter(Mandatory = $false)]
+        [string]$SearchTerms,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ItemName,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Audio', 'Video', 'Image', 'Message', 'Document', 'Folder')]
+        [string[]]$ItemType,
+
+        [Parameter(Mandatory = $false)]
+        [string]$FilterExpression,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('And', 'Or')]
+        [string]$FilterMode = 'And',
+
+        [Parameter(Mandatory = $false)]
+        [switch]$IncludeDeleted,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$DeletedOnly,
+
+        [Parameter(Mandatory = $false)]
+        [DateTime]$StartTime,
+
+        [Parameter(Mandatory = $false)]
+        [DateTime]$EndTime,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Recursive,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$FullHistory,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateScript({
+            if ($_ -is [int] -and $_ -gt 0) { return $true }
+            if ($_ -is [string] -and $_.ToLower() -eq 'unlimited') { return $true }
+            if ($_ -is [int] -and $_ -le 0) { throw "ResultSize must be a positive integer or 'Unlimited'" }
+            throw "ResultSize must be a positive integer or 'Unlimited'"
+        })]
+        $ResultSize = 100,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$CountOnly,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$StartIndex = 0
+    )
+
+    begin {
+        Write-Verbose "Search-KeepitSnapshot: Initializing"
+
+        # Validate that at least RootPath or SearchTerms is provided
+        if (-not $RootPath -and -not $SearchTerms) {
+            throw "At least one of RootPath or SearchTerms must be specified."
+        }
+
+        # Validate that IncludeDeleted and DeletedOnly are not both specified
+        if ($IncludeDeleted -and $DeletedOnly) {
+            throw "Cannot specify both -IncludeDeleted and -DeletedOnly. Use -IncludeDeleted to include deleted items in results, or -DeletedOnly to return only deleted items."
+        }
+
+        # Validate RootPath starts with a slash
+        if ($RootPath -and -not $RootPath.StartsWith('/')) {
+            throw "RootPath must start with a forward slash (/). Received: '$RootPath'"
+        }
+
+        # Validate that CountOnly and ResultSize are not both specified
+        if ($CountOnly -and $PSBoundParameters.ContainsKey('ResultSize')) {
+            throw "Cannot specify both -CountOnly and -ResultSize. Use -CountOnly to get just the count, or -ResultSize to get results."
+        }
+
+        # Validate that EndTime is not before StartTime
+        if ($StartTime -and $EndTime -and $EndTime -lt $StartTime) {
+            throw "EndTime ($($EndTime.ToString('yyyy-MM-dd'))) cannot be before StartTime ($($StartTime.ToString('yyyy-MM-dd')))"
+        }
+
+        # Determine if we're doing unlimited results
+        $isUnlimited = $ResultSize -is [string] -and $ResultSize.ToLower() -eq 'unlimited'
+        $pageSize = if ($isUnlimited) { 100 } else { [int]$ResultSize }
+
+        Write-Verbose "ResultSize: $(if ($CountOnly) { 'CountOnly' } elseif ($isUnlimited) { 'Unlimited' } else { $pageSize })"
+
+        # Get authentication header and base URL once for all pipeline items
+        try {
+            $authHeader = Get-AuthHeader
+            $baseUrl = Get-KeepitBaseUrl
+            $userId = Get-KeepitUserId -AuthHeader $authHeader -BaseUrl $baseUrl
+            Write-Verbose "Base URL: $baseUrl, User ID: $userId"
+        }
+        catch {
+            throw "Failed to initialize: $($_.Exception.Message)"
+        }
+    }
+
+    process {
+        try {
+            # Resolve connector identity to GUID
+            $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $connectorGuid = $resolved.ConnectorGuid
+            Write-Verbose "=== Processing Connector ==="
+            Write-Verbose "Connector: $($resolved.Name) ($connectorGuid)"
+            Write-Verbose "RootPath: $(if ($RootPath) { $RootPath } else { '(not specified)' })"
+            Write-Verbose "SearchTerms: $(if ($SearchTerms) { $SearchTerms } else { '(not specified)' })"
+            Write-Verbose "ItemType: $(if ($ItemType) { $ItemType -join ', ' } else { '(not specified)' })"
+            Write-Verbose "IncludeDeleted: $IncludeDeleted"
+            Write-Verbose "DeletedOnly: $DeletedOnly"
+            Write-Verbose "Recursive: $Recursive"
+
+            # Note about Entra connector and DeletedOnly - API filter doesn't work, using client-side filtering
+            if ($resolved.Type -eq 'azure-ad' -and $DeletedOnly) {
+                Write-Verbose "Entra connector with DeletedOnly: using client-side filtering (API 'deleted' filter not supported)"
+            }
+
+            # Validate Entra ID (azure-ad) pathroot prefixes
+            if ($resolved.Type -eq 'azure-ad' -and $RootPath) {
+                $validEntraIdPaths = @(
+                    'Administrative units',
+                    'App registrations',
+                    'Devices',
+                    'Groups',
+                    'Policies',
+                    'Roles',
+                    'Service principals',
+                    'Users'
+                )
+
+                # Extract first path element (after optional leading slash)
+                $pathToCheck = $RootPath.TrimStart('/')
+                $firstElement = ($pathToCheck -split '/')[0]
+
+                if ($firstElement -and $firstElement -notin $validEntraIdPaths) {
+                    $validPathsList = $validEntraIdPaths -join ', '
+                    throw "Invalid RootPath for Entra ID connector. The first path element must be one of: $validPathsList. Received: '$firstElement'"
+                }
+                Write-Verbose "Entra ID RootPath validation passed: '$firstElement'"
+            }
+
+            # Check if RootPath contains a UPN and convert it to a GUID
+            if ($RootPath) {
+                $pathSegments = $RootPath -split '/'
+                # Path format: /Users/{identifier}/... - check if identifier (segment 2) contains @
+                if ($pathSegments.Count -ge 3 -and $pathSegments[1] -eq 'Users' -and $pathSegments[2] -match '@') {
+                    $upn = $pathSegments[2]
+                    Write-Verbose "Detected UPN in RootPath: $upn - converting to GUID"
+
+                    try {
+                        $guidResult = Convert-KeepitUPNToGuid -UserPrincipalName $upn -Connector $connectorGuid -ErrorAction SilentlyContinue 2>$null
+                        if ($guidResult -and $guidResult.Guid) {
+                            Write-Verbose "Converted UPN '$upn' to GUID '$($guidResult.Guid)'"
+                            $pathSegments[2] = $guidResult.Guid
+                            $RootPath = $pathSegments -join '/'
+                            Write-Verbose "Updated RootPath: $RootPath"
+                        }
+                        else {
+                            Write-Error "User '$upn' was not found on connector '$($resolved.Name)'. Please verify the user or path and connector."
+                            return
+                        }
+                    }
+                    catch {
+                        # Check if this is a 404 (user not found) error
+                        if ($_.Exception.Message -match '404') {
+                            Write-Error "User '$upn' was not found on connector '$($resolved.Name)'. Please verify the user or path and connector."
+                            return
+                        }
+                        # For other errors, provide context but still stop
+                        Write-Error "Failed to resolve user '$upn' on connector '$($resolved.Name)': $($_.Exception.Message)"
+                        return
+                    }
+                }
+            }
+
+            # Build query parameters
+            $queryParams = @()
+            $queryParams += "apiVersion=2"
+
+            # Device (connector)
+            $queryParams += "device=$connectorGuid"
+
+            # RootPath (with masking)
+            if ($RootPath) {
+                $maskedPath = ConvertTo-MaskedPath -Path $RootPath
+                Write-Verbose "RootPath: $RootPath -> Masked: $maskedPath"
+                $queryParams += "pathRoot=$([System.Uri]::EscapeDataString($maskedPath))"
+            }
+
+            # SearchTerms
+            if ($SearchTerms) {
+                $queryParams += "searchTerms=$([System.Uri]::EscapeDataString($SearchTerms))"
+            }
+
+            # ItemName (exact match)
+            if ($ItemName) {
+                $queryParams += "itemName=$([System.Uri]::EscapeDataString($ItemName))"
+            }
+
+            # Recursive
+            if ($Recursive) {
+                $queryParams += "recursive=1"
+            }
+
+            # FullHistory
+            if ($FullHistory) {
+                $queryParams += "fullHistory=1"
+            }
+
+            # CountOnly - set includeBody=0 to get just the count
+            if ($CountOnly) {
+                $queryParams += "includeBody=0"
+                Write-Verbose "CountOnly mode: includeBody=0"
+            }
+
+            if ($StartTime -and $EndTime) {
+                # Check if StartTime and EndTime are the same date (whole-day search)
+                if ($StartTime.Date -eq $EndTime.Date) {
+                    Write-Verbose "StartTime and EndTime are the same date - expanding to full day"
+                    $startTimeStr = ConvertTo-KeepitTimestamp -DateTime $StartTime.Date
+                    $endTimeStr = ConvertTo-KeepitTimestamp -DateTime $EndTime.Date.AddDays(1).AddSeconds(-1)
+                }
+                else {
+                    $startTimeStr = ConvertTo-KeepitTimestamp -DateTime $StartTime
+                    $endTimeStr = ConvertTo-KeepitTimestamp -DateTime $EndTime
+                }
+                $queryParams += "snaptimeFrom=$startTimeStr"
+                $queryParams += "snaptimeTo=$endTimeStr"
+            }
+            elseif ($StartTime) {
+                $startTimeStr = ConvertTo-KeepitTimestamp -DateTime $StartTime
+                $queryParams += "snaptimeFrom=$startTimeStr"
+            }
+            elseif ($EndTime) {
+                $endTimeStr = ConvertTo-KeepitTimestamp -DateTime $EndTime
+                $queryParams += "snaptimeTo=$endTimeStr"
+            }
+
+            # Build filter expression; we always exclude system items but we need to include / exclude deleted items based on the parameters
+            # Model URL: filterOr=AND:deleted,!sys;
+            $filterParts = @()
+
+            # When DeletedOnly is set, we need 'deleted' first to match model URL
+            # Note: The API 'deleted' filter doesn't work for Entra (azure-ad) connectors,
+            # so we skip the API filter and rely on client-side filtering for those
+            if ($DeletedOnly -and $resolved.Type -ne 'azure-ad') {
+                $filterParts += 'deleted'
+            }
+            $filterParts += '!sys'
+
+            # Add item type filters
+            $itemTypeFilters = @()
+            if ($ItemType) {
+                foreach ($type in $ItemType) {
+                    $itemTypeFilters += $type.ToLower()
+                }
+            }
+
+            # Build the final filter string
+            $filterString = ''
+            if ($FilterExpression) {
+                # User provided custom filter - use it directly
+                $filterString = $FilterExpression
+            }
+            elseif ($filterParts.Count -gt 0 -or $itemTypeFilters.Count -gt 0) {
+                # Build filter from components
+                $groups = @()
+
+                if ($filterParts.Count -gt 0) {
+                    $groups += "AND:$($filterParts -join ',')"
+                }
+
+                if ($itemTypeFilters.Count -gt 0) {
+                    $groups += "OR:$($itemTypeFilters -join ',')"
+                }
+
+                $filterString = $groups -join ';'
+            }
+
+            if ($filterString) {
+                # Add trailing semicolon to match model URL format
+                if (-not $filterString.EndsWith(';')) {
+                    $filterString += ';'
+                }
+                # Use filterOr when DeletedOnly is set (matches model URL), otherwise respect FilterMode
+                $filterParam = if ($DeletedOnly -or $FilterMode -eq 'Or') { 'filterOr' } else { 'filterAnd' }
+                $queryParams += "$filterParam=$([System.Uri]::EscapeDataString($filterString))"
+                Write-Verbose "Filter ($filterParam): $filterString"
+            }
+
+            # Show all query parameters
+            Write-Verbose "=== Query Parameters (before pagination) ==="
+            foreach ($param in $queryParams) {
+                Write-Verbose "  $param"
+            }
+
+            # Headers for the request
+            $headers = @{
+                'Authorization' = $authHeader
+                'Content-Type'  = 'application/json'
+                'Accept'        = 'application/json'
+            }
+
+            # Handle CountOnly mode separately - just one request to get the count
+            if ($CountOnly) {
+                $countParams = $queryParams + @("count=1", "startIndex=0")
+                $queryString = $countParams -join '&'
+                $uri = "$baseUrl/users/$userId/bsearch?$queryString"
+
+                Write-Verbose "=== CountOnly API Request ==="
+                Write-Verbose "Request URI: $uri"
+
+                # Use Invoke-WebRequest for raw response to avoid PowerShell's unpredictable XML deserialization
+                $webResponse = $null
+                try {
+                    $webResponse = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+                }
+                catch {
+                    # Handle 404 errors gracefully
+                    $exMsg = $_.Exception.Message
+                    if ($exMsg -match '404' -or $exMsg -match 'path does not exist') {
+                        $pathInfo = if ($RootPath) { "'$RootPath'" } else { "specified path" }
+                        Write-Warning "Path not found: $pathInfo does not exist on connector '$($resolved.Name)'. Count: 0"
+                        [PSCustomObject]@{
+                            ConnectorGuid = $connectorGuid
+                            RootPath      = $RootPath
+                            SearchTerms   = $SearchTerms
+                            Count         = 0
+                        }
+                        return
+                    }
+                    # Re-throw other errors to be handled by the outer catch block
+                    throw
+                }
+                $rawContent = $webResponse.Content
+
+                # Handle byte array response (PowerShell 7 may return byte[] for some content types)
+                if ($rawContent -is [byte[]]) {
+                    $rawContent = [System.Text.Encoding]::UTF8.GetString($rawContent)
+                }
+
+                Write-Verbose "CountOnly Response Status: $($webResponse.StatusCode)"
+                Write-Verbose "CountOnly Response Content-Type: $($webResponse.Headers.'Content-Type')"
+                if ($rawContent) {
+                    Write-Verbose "CountOnly Raw Content (first 500 chars): $($rawContent.Substring(0, [Math]::Min(500, $rawContent.Length)))"
+                }
+                else {
+                    Write-Verbose "CountOnly Raw Content: (empty)"
+                }
+
+                # Extract total count from XML response
+                # API consistently returns application/atom+xml with opensearch:totalResults
+                $totalCount = 0
+                try {
+                    $xmlDoc = [xml]$rawContent
+                    $totalNode = $xmlDoc.SelectSingleNode("//*[local-name()='totalResults']")
+                    if ($null -ne $totalNode) {
+                        $totalCount = [int]$totalNode.InnerText
+                        Write-Verbose "[COUNT-BRANCH] Found XML totalResults: $totalCount"
+                    }
+                }
+                catch {
+                    Write-Verbose "XML parsing failed: $($_.Exception.Message)"
+                }
+
+                Write-Verbose "Total count from API: $totalCount"
+
+                # Return count object
+                [PSCustomObject]@{
+                    ConnectorGuid = $connectorGuid
+                    RootPath      = $RootPath
+                    SearchTerms   = $SearchTerms
+                    Count         = $totalCount
+                }
+
+                return
+            }
+
+            # Pagination - will be updated in loop
+            $currentIndex = $StartIndex
+            $totalReturned = 0
+            $hasMoreResults = $true
+
+            while ($hasMoreResults) {
+                # Calculate count for this request
+                $requestCount = if ($isUnlimited) {
+                    $pageSize
+                }
+                else {
+                    [Math]::Min($pageSize - $totalReturned, 100)
+                }
+
+                if ($requestCount -le 0) {
+                    break
+                }
+
+                # Build final query string with pagination
+                $paginatedParams = $queryParams + @("count=$requestCount", "startIndex=$currentIndex")
+                $queryString = $paginatedParams -join '&'
+                $uri = "$baseUrl/users/$userId/bsearch?$queryString"
+
+                Write-Verbose "=== API Request ==="
+                Write-Verbose "Request URI: $uri"
+                Write-Verbose "Request Headers: $($headers | ConvertTo-Json -Compress)"
+                Write-Verbose "Fetching results $currentIndex to $($currentIndex + $requestCount - 1)"
+
+                # Make API call
+                $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+
+                # Debug: Show response structure
+                Write-Verbose "=== API Response ==="
+                if ($null -eq $response) {
+                    Write-Verbose "Response is null"
+                }
+                else {
+                    $responseType = if ($response) { $response.GetType().FullName } else { 'null' }
+                    Write-Verbose "Response Type: $responseType"
+
+                    if ($response -is [System.Xml.XmlDocument]) {
+                        Write-Verbose "Response is XmlDocument"
+                        if ($response.DocumentElement) {
+                            Write-Verbose "Root element: $($response.DocumentElement.LocalName)"
+                            if ($response.DocumentElement.ChildNodes) {
+                                Write-Verbose "Child elements: $($response.DocumentElement.ChildNodes | ForEach-Object { $_.LocalName } | Join-String -Separator ', ')"
+                            }
+                        }
+                    }
+                    elseif ($response -is [System.Xml.XmlElement]) {
+                        Write-Verbose "Response is XmlElement: $($response.LocalName)"
+                    }
+                    elseif ($response -is [PSCustomObject] -or $response -is [hashtable]) {
+                        Write-Verbose "Response is Object/Hashtable"
+                        Write-Verbose "Top-level properties: $($response.PSObject.Properties.Name -join ', ')"
+                        if ($response.feed) {
+                            Write-Verbose "feed properties: $($response.feed.PSObject.Properties.Name -join ', ')"
+                            if ($response.feed.entry) {
+                                $entryCount = if ($response.feed.entry -is [System.Array]) { $response.feed.entry.Count } else { 1 }
+                                Write-Verbose "feed.entry count: $entryCount"
+                            }
+                            if ($response.feed.'opensearch:totalResults') {
+                                Write-Verbose "Total results (opensearch): $($response.feed.'opensearch:totalResults')"
+                            }
+                        }
+                    }
+                    elseif ($response -is [string]) {
+                        Write-Verbose "Response is string (first 500 chars): $($response.Substring(0, [Math]::Min(500, $response.Length)))"
+                    }
+                    else {
+                        Write-Verbose "Response is other type"
+                    }
+                }
+
+                # Parse response - API returns application/atom+xml
+                # PowerShell converts multiple results to System.Array, single result to XmlDocument
+                $entries = @()
+
+                if ($null -eq $response) {
+                    # Null response means empty feed - no results found
+                    Write-Verbose "[PARSE-NULL] Response is null - no results in this page"
+                    # $entries stays empty, loop will exit
+                }
+                elseif ($response -is [System.Array]) {
+                    # Multiple results: PowerShell unpacked the XML into an array
+                    Write-Verbose "[PARSE-ARRAY] Direct array with $($response.Count) items"
+                    $entries = $response
+                }
+                elseif ($response -is [System.Xml.XmlDocument] -or $response -is [System.Xml.XmlElement]) {
+                    # XML response - could be single entry or feed with entries
+                    $root = if ($response -is [System.Xml.XmlDocument]) { $response.DocumentElement } else { $response }
+                    if ($root.LocalName -eq 'entry') {
+                        # Single result: root element is the entry itself
+                        Write-Verbose "[PARSE-XML] Single entry (XmlElement)"
+                        $entries = @($root)
+                    }
+                    elseif ($root.LocalName -eq 'feed') {
+                        # Feed with entries: extract entry elements
+                        $entryNodes = $root.SelectNodes("//*[local-name()='entry']")
+                        if ($entryNodes -and $entryNodes.Count -gt 0) {
+                            Write-Verbose "[PARSE-XML] Feed with $($entryNodes.Count) entries"
+                            $entries = @($entryNodes)
+                        }
+                        else {
+                            Write-Verbose "[PARSE-XML] Feed with no entries"
+                        }
+                    }
+                    else {
+                        Write-Verbose "[PARSE-XML] Unexpected root element: $($root.LocalName)"
+                    }
+                }
+                else {
+                    # Fallback for unexpected response formats
+                    Write-Verbose "[PARSE-FALLBACK] Unexpected response type: $($response.GetType().FullName)"
+                    try {
+                        $responseJson = $response | ConvertTo-Json -Depth 3 -Compress -ErrorAction SilentlyContinue
+                        if ($responseJson) {
+                            Write-Verbose "Response (first 2000 chars): $($responseJson.Substring(0, [Math]::Min(2000, $responseJson.Length)))"
+                        }
+                    }
+                    catch {
+                        Write-Verbose "Could not convert response to JSON: $($_.Exception.Message)"
+                    }
+                }
+
+                # Filter out null entries that can occur from @($null)
+                $entries = @($entries | Where-Object { $null -ne $_ })
+                Write-Verbose "Parsed $($entries.Count) entries from response"
+
+                if ($entries.Count -eq 0) {
+                    $hasMoreResults = $false
+                    break
+                }
+
+                # Process and output each entry
+                $entryIndex = 0
+                foreach ($entry in $entries) {
+                    # Skip null entries
+                    if ($null -eq $entry) {
+                        Write-Verbose "Skipping null entry at index $entryIndex"
+                        $entryIndex++
+                        continue
+                    }
+
+                    # Debug first entry structure
+                    if ($entryIndex -eq 0) {
+                        Write-Verbose "=== First Entry Structure ==="
+                        try {
+                            Write-Verbose "Entry type: $($entry.GetType().FullName)"
+                            if ($entry -is [System.Xml.XmlElement]) {
+                                Write-Verbose "Entry is XmlElement, LocalName: $($entry.LocalName)"
+                                Write-Verbose "Child elements: $($entry.ChildNodes | ForEach-Object { $_.LocalName } | Where-Object { $_ } | Join-String -Separator ', ')"
+                            }
+                            else {
+                                $entryProps = $entry.PSObject.Properties.Name -join ', '
+                                Write-Verbose "Entry properties: $entryProps"
+                            }
+                        }
+                        catch {
+                            Write-Verbose "Could not enumerate entry properties: $($_.Exception.Message)"
+                        }
+                    }
+                    $entryIndex++
+
+                    # Extract metadata into a hashtable
+                    $metadata = @{}
+
+                    # Handle different response structures
+                    $id = $null
+                    $name = $null
+                    $title = $null
+                    $updated = $null
+                    $published = $null
+                    $size = $null
+                    $contentType = $null
+                    $isDeleted = $false
+                    $detectedType = $null
+
+                    # Helper function to safely get property value from XML or PSObject
+                    function Get-SafeValue {
+                        param($obj, $propName)
+                        if ($null -eq $obj) { return $null }
+
+                        try {
+                            $val = $null
+
+                            # For XML elements, try multiple access methods
+                            if ($obj -is [System.Xml.XmlElement]) {
+                                # Try direct property access first
+                                $val = $obj.$propName
+
+                                # If that didn't work and propName has a colon (namespace), try without namespace
+                                if ($null -eq $val -and $propName -match ':') {
+                                    $localName = $propName -replace '^.*:', ''
+                                    $val = $obj.$localName
+                                }
+
+                                # Try SelectSingleNode for namespaced elements
+                                if ($null -eq $val) {
+                                    $localName = $propName -replace '^.*:', ''
+                                    $node = $obj.SelectSingleNode("*[local-name()='$localName']")
+                                    if ($node) { $val = $node }
+                                }
+
+                                # Try GetElementsByTagName
+                                if ($null -eq $val) {
+                                    $localName = $propName -replace '^.*:', ''
+                                    $nodes = $obj.GetElementsByTagName($localName)
+                                    if ($nodes -and $nodes.Count -gt 0) { $val = $nodes[0] }
+                                }
+                            }
+                            else {
+                                # Standard property access for non-XML objects
+                                $val = $obj.$propName
+                            }
+
+                            # Extract text value from the result
+                            if ($val -is [System.Xml.XmlElement]) {
+                                return $val.InnerText
+                            }
+                            elseif ($val -is [System.Xml.XmlNode]) {
+                                return $val.InnerText
+                            }
+                            elseif ($val -is [PSCustomObject] -and $val.'#text') {
+                                return $val.'#text'
+                            }
+                            elseif ($null -ne $val -and $val -isnot [System.Array]) {
+                                $strVal = $val.ToString()
+                                if ($strVal -and $strVal -ne $val.GetType().FullName) {
+                                    return $strVal
+                                }
+                            }
+                        }
+                        catch { }
+                        return $null
+                    }
+
+                    # Try to extract standard Atom fields
+                    $id = Get-SafeValue $entry 'id'
+                    $title = Get-SafeValue $entry 'title'
+                    $updated = Get-SafeValue $entry 'updated'
+                    $published = Get-SafeValue $entry 'published'
+
+                    # Try to extract Keepit-specific fields (kng namespace)
+                    # PowerShell XML converts namespaced elements - try both with and without namespace
+                    $name = Get-SafeValue $entry 'kng:name'
+                    if (-not $name) { $name = Get-SafeValue $entry 'name' }
+
+                    $sizeStr = Get-SafeValue $entry 'kng:size'
+                    if (-not $sizeStr) { $sizeStr = Get-SafeValue $entry 'size' }
+                    if ($sizeStr) {
+                        try { $size = [long]$sizeStr } catch { $size = $null }
+                    }
+
+                    # Check for deleted status - the <deleted/> tag may be empty (self-closing)
+                    # or contain 'true'/'1'. If the element exists at all, the item is deleted.
+                    $isDeleted = $false
+                    if ($entry -is [System.Xml.XmlElement]) {
+                        # Check for kng:deleted or deleted element existence
+                        $deletedNode = $entry.SelectSingleNode("*[local-name()='deleted']")
+                        if ($deletedNode) {
+                            $isDeleted = $true
+                        }
+                    }
+                    else {
+                        # For non-XML (PSCustomObject), check for property existence
+                        # If the 'deleted' or 'kng:deleted' property exists, the item is deleted
+                        $hasDeletedProp = ($entry.PSObject.Properties.Name -contains 'deleted') -or
+                                          ($entry.PSObject.Properties.Name -contains 'kng:deleted')
+                        if ($hasDeletedProp) {
+                            $isDeleted = $true
+                        }
+                        else {
+                            # Fallback: check for value 'true' or '1'
+                            $deletedStr = Get-SafeValue $entry 'kng:deleted'
+                            if (-not $deletedStr) { $deletedStr = Get-SafeValue $entry 'deleted' }
+                            if ($deletedStr -eq 'true' -or $deletedStr -eq '1') {
+                                $isDeleted = $true
+                            }
+                        }
+                    }
+
+                    $detectedType = Get-SafeValue $entry 'kng:class'
+                    if (-not $detectedType) { $detectedType = Get-SafeValue $entry 'class' }
+
+                    # Content type from link or content element
+                    try {
+                        if ($entry.content) {
+                            $contentType = if ($entry.content -is [System.Xml.XmlElement]) {
+                                $entry.content.GetAttribute('type')
+                            }
+                            elseif ($entry.content.type) {
+                                $entry.content.type
+                            }
+                            else { $null }
+                        }
+                        if (-not $contentType -and $entry.link) {
+                            $links = if ($entry.link -is [System.Array]) { $entry.link } else { @($entry.link) }
+                            foreach ($link in $links) {
+                                $linkType = if ($link -is [System.Xml.XmlElement]) {
+                                    $link.GetAttribute('type')
+                                }
+                                elseif ($link.type) {
+                                    $link.type
+                                }
+                                else { $null }
+                                if ($linkType) {
+                                    $contentType = $linkType
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    catch {
+                        Write-Verbose "Warning: Could not extract content type: $($_.Exception.Message)"
+                    }
+
+                    # Derive ItemType from contentType if not already set
+                    if (-not $detectedType) {
+                        # Mail messages: contentType contains 'message/rfc822'
+                        if ($contentType -and $contentType -like '*message/rfc822*') {
+                            $detectedType = 'Message'
+                        }
+                        # Entra ID users: connector is azure-ad, item is folder-like, and path contains /Users
+                        elseif ($resolved.Type -eq 'azure-ad' -and $contentType -like '*folder*' -and $RootPath -like '*/Users*') {
+                            $detectedType = 'user'
+                        }
+                        # OneDrive/file items: folder contentType
+                        elseif ($contentType -eq 'folder') {
+                            $detectedType = 'folder'
+                        }
+                        # OneDrive/file items: application/* or image/* contentType
+                        elseif ($contentType -and ($contentType -like 'application/*' -or $contentType -like 'image/*')) {
+                            $detectedType = 'file'
+                        }
+                    }
+
+                    # Collect all other properties as metadata
+                    try {
+                        if ($entry.PSObject.Properties) {
+                            foreach ($prop in $entry.PSObject.Properties) {
+                                $propName = $prop.Name
+                                if ($propName -and $propName -notin @('id', 'title', 'updated', 'published', 'kng:name', 'name', 'kng:size', 'size', 'kng:deleted', 'deleted', 'kng:class', 'class', 'content', 'link')) {
+                                    $metadata[$propName] = $prop.Value
+                                }
+                            }
+                        }
+                        elseif ($entry -is [System.Xml.XmlElement]) {
+                            # Handle XML element - iterate through child nodes
+                            foreach ($childNode in $entry.ChildNodes) {
+                                $nodeName = $childNode.LocalName
+                                if ($nodeName -and $nodeName -notin @('id', 'title', 'updated', 'published', 'name', 'size', 'deleted', 'class', 'content', 'link')) {
+                                    $metadata[$nodeName] = $childNode.InnerText
+                                }
+                            }
+                        }
+                    }
+                    catch {
+                        Write-Verbose "Warning: Could not extract metadata from entry: $($_.Exception.Message)"
+                    }
+
+                    # Extract size from kng:meta elements if Size not already set
+                    if (-not $size) {
+                        try {
+                            if ($entry -is [System.Xml.XmlElement]) {
+                                foreach ($childNode in $entry.ChildNodes) {
+                                    if ($childNode.LocalName -eq 'meta' -and $childNode.GetAttribute('key') -eq 'size') {
+                                        $size = $childNode.InnerText
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                        catch {
+                            Write-Verbose "Warning: Could not extract size from meta: $($_.Exception.Message)"
+                        }
+                    }
+
+                    # Client-side filtering for DeletedOnly (API filter doesn't work for all connector types)
+                    if ($DeletedOnly -and -not $isDeleted) {
+                        Write-Verbose "Skipping non-deleted item: $name"
+                        continue
+                    }
+
+                    # Create and output result object
+                    [PSCustomObject]@{
+                        Id            = $id
+                        Name          = $name
+                        Title         = $title
+                        Updated       = $updated
+                        Size          = $size
+                        ContentType   = $contentType
+                        ItemType      = $detectedType
+                        IsDeleted     = $isDeleted
+                        ConnectorGuid = $connectorGuid
+                        Metadata      = $metadata
+                    }
+
+                    $totalReturned++
+
+                    # Check if we've reached the requested count
+                    if (-not $isUnlimited -and $totalReturned -ge $pageSize) {
+                        $hasMoreResults = $false
+                        break
+                    }
+                }
+
+                # Check if we should continue pagination
+                if ($entries.Count -lt $requestCount) {
+                    # Received fewer results than requested - no more results
+                    Write-Verbose "Received fewer entries ($($entries.Count)) than requested ($requestCount) - no more results"
+                    $hasMoreResults = $false
+                }
+                elseif ($isUnlimited) {
+                    # Continue to next page for unlimited
+                    $currentIndex += $entries.Count
+                    Write-Verbose "Unlimited mode: advancing to index $currentIndex"
+                }
+                elseif ($totalReturned -lt $pageSize) {
+                    # Continue to next page until we reach requested ResultSize
+                    $currentIndex += $entries.Count
+                    Write-Verbose "Pagination: advancing to index $currentIndex (have $totalReturned of $pageSize)"
+                }
+                else {
+                    Write-Verbose "Reached requested ResultSize ($pageSize)"
+                    $hasMoreResults = $false
+                }
+            }
+
+            Write-Verbose "Total results returned: $totalReturned"
+
+            if ($totalReturned -eq 0) {
+                Write-Warning "Search-KeepitSnapshot: No matching results found"
+            }
+        }
+        catch {
+            # Handle specific HTTP errors with cleaner messages
+            $statusCode = $null
+            $errorDetail = $null
+            $exceptionMessage = $_.Exception.Message
+
+            # Try multiple methods to extract status code
+            if ($_.Exception -is [Microsoft.PowerShell.Commands.HttpResponseException]) {
+                $statusCode = $_.Exception.Response.StatusCode.value__
+            }
+            elseif ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+                $statusCode = $_.Exception.Response.StatusCode.value__
+            }
+
+            # Fallback: extract status code from exception message (e.g., "404 (Not Found)")
+            if (-not $statusCode -and $exceptionMessage -match '\b(4\d{2}|5\d{2})\b') {
+                $statusCode = [int]$Matches[1]
+            }
+
+            # Try to extract error details from ErrorDetails
+            if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+                $errorDetail = $_.ErrorDetails.Message
+            }
+
+            # Handle 404 Not Found - path doesn't exist
+            if ($statusCode -eq 404 -or $exceptionMessage -match 'path does not exist') {
+                $pathInfo = if ($RootPath) { "'$RootPath'" } else { "specified path" }
+                Write-Warning "Path not found: $pathInfo does not exist on connector '$($resolved.Name)'. No results returned."
+                return
+            }
+
+            # Default error handling for other errors
+            throw "Failed to search connector $connectorGuid : $exceptionMessage"
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Converts a path to Keepit masked path format
+.DESCRIPTION
+    Masks special characters in paths for the BSearch API:
+    - : becomes -c
+    - / becomes -s (within path segments, not the segment separator)
+    - - becomes --
+.PARAMETER Path
+    The path to mask
+.OUTPUTS
+    String - The masked path
+#>
+function ConvertTo-MaskedPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    # Split path into segments, mask each segment, then rejoin
+    $segments = $Path -split '/'
+    $maskedSegments = @()
+
+    foreach ($segment in $segments) {
+        if ([string]::IsNullOrEmpty($segment)) {
+            $maskedSegments += ''
+            continue
+        }
+
+        # Order matters: escape - first (to --), then : (to -c), then internal / (to -s)
+        $masked = $segment -replace '-', '--'
+        $masked = $masked -replace ':', '-c'
+        # Note: / within segment names (like URLs) need to be escaped to -s
+        # But since we split on /, segments shouldn't contain / unless it's part of a URL
+        # URLs like https://site.sharepoint.com would be: https-c-s-ssite.sharepoint.com
+
+        $maskedSegments += $masked
+    }
+
+    return $maskedSegments -join '/'
+}
+
+<#
+.SYNOPSIS
+    Converts a User Principal Name (UPN) to a Keepit backup GUID
+.DESCRIPTION
+    Uses the Keepit BSearch API to look up a user by their UPN (email address) and
+    returns the corresponding GUID used in backup paths. Keepit snapshots use GUIDs
+    to refer to users (e.g., /Users/xxxxx-yy-zzzzzz/Outlook/Inbox) for anonymization.
+    This cmdlet allows you to convert a human-readable UPN to the internal GUID.
+.PARAMETER UserPrincipalName
+    The User Principal Name (UPN) to look up, typically an email address.
+    Accepts pipeline input directly or by property name.
+    Aliases: UPN, Id, Email, Identity
+    Example: user@example.com
+.PARAMETER Connector
+    The name or GUID of the Keepit connector (device) to search within.
+    Can be piped from Get-KeepitConnector. Aliases: ConnectorGuid, Name
+.EXAMPLE
+    Convert-KeepitUPNToGuid -UserPrincipalName "paulr@blackdotpub.com" -Connector "abc123-def456"
+
+    Looks up the GUID for paulr@blackdotpub.com in the specified connector
+.EXAMPLE
+    "user1@example.com", "user2@example.com" | Convert-KeepitUPNToGuid -Connector "ExO Only"
+
+    Looks up GUIDs for multiple users via pipeline using connector name
+.EXAMPLE
+    Import-Csv users.csv | Convert-KeepitUPNToGuid -Connector "abc123-def456"
+
+    Looks up GUIDs for users from a CSV file with UPN, Email, or UserPrincipalName column
+.EXAMPLE
+    Get-KeepitConnector | ForEach-Object { Convert-KeepitUPNToGuid -UserPrincipalName "user@example.com" -Connector $_.ConnectorGuid }
+
+    Searches for a user across all connectors
+.EXAMPLE
+    $result = Convert-KeepitUPNToGuid -UserPrincipalName "user@example.com" -Connector "Production M365"
+    $result.Guid
+
+    Gets just the GUID value from the result
+.OUTPUTS
+    PSCustomObject with properties:
+        - UserPrincipalName: The input UPN
+        - Guid: The Keepit backup GUID for the user
+    Returns $null if the UPN is not found.
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+    The search is performed against the /Users path root in the backup.
+#>
+function Convert-KeepitUPNToGuid {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('UPN', 'Id', 'Email', 'Identity')]
+        [string]$UserPrincipalName,
+
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('ConnectorGuid', 'Name')]
+        [string]$Connector
+    )
+
+    begin {
+        Write-Verbose "Convert-KeepitUPNToGuid: Initializing"
+
+        # Resolve connector identity and get auth info once for all pipeline items
+        try {
+            $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $connectorGuid = $resolved.ConnectorGuid
+            Write-Verbose "Connector: $($resolved.Name) ($connectorGuid)"
+
+            $authHeader = Get-AuthHeader
+            $baseUrl = Get-KeepitBaseUrl
+            $userId = Get-KeepitUserId -AuthHeader $authHeader -BaseUrl $baseUrl
+            Write-Verbose "Base URL: $baseUrl, User ID: $userId"
+        }
+        catch {
+            throw "Failed to initialize: $($_.Exception.Message)"
+        }
+    }
+
+    process {
+        try {
+            Write-Verbose "Looking up GUID for UPN: $UserPrincipalName in connector: $connectorGuid"
+
+            # Build bsearch query parameters matching Bohr's implementation
+            # URL: /users/{userId}/bsearch?apiVersion=2&count=1&startIndex=0&pathRoot=/Users&device={connectorGUID}&filterOr=AND:!sys;&searchTerms="{upn}"
+            $encodedUPN = [System.Uri]::EscapeDataString("`"$UserPrincipalName`"")
+            $queryParams = @(
+                "apiVersion=2",
+                "count=1",
+                "startIndex=0",
+                "pathRoot=/Users",
+                "device=$connectorGuid",
+                "filterOr=AND:!sys;",
+                "searchTerms=$encodedUPN"
+            )
+            $queryString = $queryParams -join '&'
+            $uri = "$baseUrl/users/$userId/bsearch?$queryString"
+
+            Write-Verbose "Request URI: $uri"
+
+            # Headers for the request
+            $headers = @{
+                'Authorization' = $authHeader
+                'Content-Type'  = 'application/json'
+                'Accept'        = 'application/json'
+            }
+
+            # Make API call - use Invoke-WebRequest for raw response
+            $webResponse = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+            $rawContent = $webResponse.Content
+
+            # Handle byte array response (PowerShell 7 may return byte[] for some content types)
+            if ($rawContent -is [byte[]]) {
+                $rawContent = [System.Text.Encoding]::UTF8.GetString($rawContent)
+            }
+
+            Write-Verbose "Response Status: $($webResponse.StatusCode)"
+            Write-Verbose "Response Content-Type: $($webResponse.Headers.'Content-Type')"
+            if ($rawContent) {
+                Write-Verbose "Raw Content (first 500 chars): $($rawContent.Substring(0, [Math]::Min(500, $rawContent.Length)))"
+            }
+            else {
+                Write-Verbose "Raw Content: (empty)"
+            }
+
+            # Extract GUID from <kng:name> tag using regex (matching Bohr's approach)
+            $guid = $null
+
+            if ($rawContent -match '<kng:name>([^<]+)</kng:name>') {
+                $guid = $Matches[1]
+                Write-Verbose "Found GUID: $guid"
+            }
+
+            if (-not $guid) {
+                Write-Warning "No GUID found for UPN '$UserPrincipalName' in connector '$connectorGuid'"
+                return $null
+            }
+
+            # Return result object
+            [PSCustomObject]@{
+                UserPrincipalName = $UserPrincipalName
+                Guid              = $guid
+            }
+        }
+        catch {
+            throw "Failed to look up UPN '$UserPrincipalName' in connector '$connectorGuid': $($_.Exception.Message)"
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Retrieves the configuration and attributes for a Keepit connector
+.DESCRIPTION
+    Gets the configuration JSON and/or custom attributes for a specified Keepit connector.
+    The configuration contains connector-specific settings such as backup scope,
+    included workloads, and other options. Supports pipeline input from Get-KeepitConnector
+    for bulk operations.
+
+    Default Configuration retrieval is supported for these connector types:
+    - o365-admin (Microsoft 365)
+    - dynamics365 (Dynamics / Power Platform)
+    - azure-ad (Entra ID)
+    - powerbi (Power BI)
+
+    For other connector types, use the -Attributes parameter to fetch specific attributes.
+    When -Attributes is specified, any connector type can be used.
+
+    Use the -Workload parameter to filter and parse the configuration by specific workloads.
+    This returns a parsed PSCustomObject containing only the requested workload sections.
+.PARAMETER Connector
+    The connector name or GUID. Can be piped from Get-KeepitConnector.
+    Aliases: ConnectorGuid, Name
+.PARAMETER Attributes
+    Optional comma-separated list of attribute names to fetch, or "*" to fetch all
+    attributes. When specified, the Attributes property of the output will contain
+    a hashtable of key/value pairs. Attributes that don't exist or are empty will
+    have null values.
+
+    Examples:
+    - "*" - Fetches all attributes
+    - "ng_backup_config" - Fetches a single attribute
+    - "ng_backup_config,backup_config" - Fetches multiple attributes
+.PARAMETER Workload
+    Optional array of workload names to filter the configuration by. When specified,
+    the Configuration property will contain a parsed PSCustomObject with only the
+    requested workloads. The RawConfiguration property still contains the full JSON.
+
+    Valid workloads vary by connector type:
+    - o365-admin: Exchange, OneDrive, SharePoint, Teams
+    - dynamics365: CRM, PowerApps, PowerAutomate
+    - azure-ad: Not supported (single configuration block)
+    - powerbi: Not supported (single configuration block)
+
+    An error is thrown if an invalid workload is specified for the connector type.
+.EXAMPLE
+    Get-KeepitConnectorConfiguration -Connector "abc123-def456"
+
+    Gets the configuration for the specified connector by GUID.
+.EXAMPLE
+    Get-KeepitConnectorConfiguration -Connector "Production M365"
+
+    Gets the configuration for a connector by name.
+.EXAMPLE
+    Get-KeepitConnectorConfiguration -Connector "Production M365" -Workload Exchange
+
+    Gets only the Exchange workload configuration as a parsed object.
+    Valid M365 workloads: Exchange, OneDrive, SharePoint, Teams
+.EXAMPLE
+    Get-KeepitConnectorConfiguration -Connector "Production M365" -Workload Exchange,OneDrive
+
+    Gets Exchange and OneDrive workload configurations as parsed objects.
+.EXAMPLE
+    Get-KeepitConnectorConfiguration -Connector "Production M365" -Workload SharePoint,Teams
+
+    Gets SharePoint and Teams workload configurations.
+.EXAMPLE
+    Get-KeepitConnectorConfiguration -Connector "Dynamics Prod" -Workload CRM,PowerApps
+
+    Gets CRM and PowerApps workload configurations for a Dynamics 365 connector.
+    Valid Dynamics 365 workloads: CRM, PowerApps, PowerAutomate
+.EXAMPLE
+    Get-KeepitConnector | Get-KeepitConnectorConfiguration
+
+    Gets the configuration for all connectors via pipeline.
+.EXAMPLE
+    Get-KeepitConnectorConfiguration -Connector "abc123" | Select-Object -ExpandProperty RawConfiguration
+
+    Gets just the raw JSON configuration string for a connector.
+.EXAMPLE
+    Get-KeepitConnectorConfiguration -Connector "abc123" -Attributes "*"
+
+    Gets the configuration and all attributes for a connector.
+.EXAMPLE
+    Get-KeepitConnectorConfiguration -Connector "My Connector" -Attributes "ng_backup_config,custom_attr"
+
+    Gets the configuration and specific attributes for a connector.
+.EXAMPLE
+    Get-KeepitConnector -Type google | Get-KeepitConnectorConfiguration -Attributes "*"
+
+    Gets all attributes for Google connectors (which don't support default RawConfiguration).
+.OUTPUTS
+    PSCustomObject with properties:
+        - ConnectorGuid: The connector GUID (lowercase)
+        - Name: The connector name
+        - Type: The connector type (e.g., 'o365-admin')
+        - TypeDisplayName: Human-readable connector type (e.g., 'Microsoft 365')
+        - RawConfiguration: JSON string containing the full connector configuration (null for unsupported types)
+        - Configuration: Parsed PSCustomObject filtered by -Workload (null if -Workload not specified)
+        - Attributes: Hashtable of attribute key/value pairs (null if -Attributes not specified)
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+    RawConfiguration and attributes may contain sensitive information; handle accordingly.
+
+    Workload names map to JSON property names as follows:
+    - Exchange -> Exchange
+    - OneDrive -> OneDriveSP
+    - SharePoint -> SharePointNG
+    - Teams -> UnifiedGroups
+    - CRM -> CRM
+    - PowerApps -> PowerApps
+    - PowerAutomate -> PowerAutomate
+
+    API endpoints used:
+    - GET /users/{userId}/devices/{connectorGUID}/attributes/ng_backup_config
+      (for o365-admin and dynamics365 connectors)
+    - GET /users/{userId}/devices/{connectorGUID}/attributes/backup_config
+      (for azure-ad and powerbi connectors)
+    - GET /users/{userId}/devices/{connectorGUID}/attributes
+      (when -Attributes "*" is specified)
+    - GET /users/{userId}/devices/{connectorGUID}/attributes/{key}
+      (when -Attributes specifies individual attribute names)
+#>
+function Get-KeepitConnectorConfiguration {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('ConnectorGuid', 'Name')]
+        [string]$Connector,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Attributes,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$Workload
+    )
+
+    begin {
+        Write-Verbose "Get-KeepitConnectorConfiguration: Initializing"
+
+        # Get authentication header and base URL once for all pipeline items
+        try {
+            $authHeader = Get-AuthHeader
+            $baseUrl = Get-KeepitBaseUrl
+            $userId = Get-KeepitUserId -AuthHeader $authHeader -BaseUrl $baseUrl
+            Write-Verbose "Base URL: $baseUrl, User ID: $userId"
+        }
+        catch {
+            throw "Failed to initialize: $($_.Exception.Message)"
+        }
+    }
+
+    process {
+        try {
+            # Resolve connector identity to GUID
+            $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $connectorGuid = $resolved.ConnectorGuid
+            $connectorName = $resolved.Name
+            $connectorType = $resolved.Type
+            Write-Verbose "Connector: $connectorName ($connectorGuid, Type: $connectorType)"
+
+            # Determine supported connector types for default configuration retrieval
+            $supportedConfigTypes = @('o365-admin', 'dynamics365', 'azure-ad', 'powerbi')
+            $isConfigSupported = $connectorType -in $supportedConfigTypes
+
+            # Validate -Workload parameter against connector type
+            if ($Workload) {
+                Test-WorkloadParameter -Workload $Workload -ConnectorType $connectorType
+            }
+
+            # If -Attributes is not specified, require supported connector type
+            if (-not $Attributes -and -not $isConfigSupported) {
+                $displayName = Get-ConnectorTypeDisplayName -ConnectorType $connectorType
+                throw "This connector type is not yet supported: $displayName ($connectorType). Use -Attributes to fetch specific attributes."
+            }
+
+            # Initialize result properties
+            $configXml = $null
+            $attributesResult = $null
+
+            # Fetch default configuration for supported connector types
+            if ($isConfigSupported) {
+                # Determine the correct attribute endpoint based on connector type
+                $configAttribute = switch ($connectorType) {
+                    { $_ -in @('o365-admin', 'dynamics365') } { 'ng_backup_config' }
+                    { $_ -in @('azure-ad', 'powerbi') } { 'backup_config' }
+                }
+                Write-Verbose "Using config attribute: $configAttribute for connector type: $connectorType"
+
+                # Build request to get connector configuration
+                $uri = "$baseUrl/users/$userId/devices/$connectorGuid/attributes/$configAttribute"
+                $headers = @{
+                    'Authorization' = $authHeader
+                }
+
+                Write-Verbose "Fetching configuration from: $uri (attribute: $configAttribute)"
+
+                try {
+                    # Make API call - use Invoke-WebRequest to get raw content since API returns octet-stream
+                    $webResponse = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+
+                    Write-Verbose "Response Content-Type: $($webResponse.Headers.'Content-Type')"
+                    Write-Verbose "Response length: $($webResponse.Content.Length) bytes"
+
+                    # Get the raw content as a string
+                    $configXml = if ($webResponse.Content -is [byte[]]) {
+                        [System.Text.Encoding]::UTF8.GetString($webResponse.Content)
+                    }
+                    else {
+                        $webResponse.Content
+                    }
+
+                    Write-Verbose "Configuration retrieved: $($configXml.Length) characters"
+                }
+                catch {
+                    Write-Verbose "Failed to retrieve default configuration: $($_.Exception.Message)"
+                    $configXml = $null
+                }
+            }
+
+            # Fetch requested attributes if -Attributes is specified
+            if ($Attributes) {
+                $attributesResult = @{}
+                $headers = @{
+                    'Authorization' = $authHeader
+                }
+
+                if ($Attributes -eq '*') {
+                    # Fetch all attributes - first get the list of attribute names, then fetch each value
+                    Write-Verbose "Fetching all attributes for connector"
+                    $uri = "$baseUrl/users/$userId/devices/$connectorGuid/attributes"
+
+                    try {
+                        $webResponse = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+                        $responseContent = if ($webResponse.Content -is [byte[]]) {
+                            [System.Text.Encoding]::UTF8.GetString($webResponse.Content)
+                        }
+                        else {
+                            $webResponse.Content
+                        }
+
+                        Write-Verbose "All attributes response: $($responseContent.Substring(0, [Math]::Min(200, $responseContent.Length)))"
+
+                        # Parse the XML response to get attribute names
+                        $attrNames = @()
+                        if ($responseContent -match '^\s*<') {
+                            $attrXml = [xml]$responseContent
+                            # The response contains attribute elements with name attribute
+                            foreach ($attr in $attrXml.attributes.attribute) {
+                                $attrName = $attr.name
+                                if ($attrName) {
+                                    $attrNames += $attrName
+                                    Write-Verbose "Found attribute name: $attrName"
+                                }
+                            }
+                        }
+
+                        # Now fetch each attribute value individually
+                        Write-Verbose "Fetching values for $($attrNames.Count) attributes"
+                        foreach ($attrName in $attrNames) {
+                            $attrUri = "$baseUrl/users/$userId/devices/$connectorGuid/attributes/$attrName"
+                            try {
+                                $attrResponse = Invoke-WebRequest -Uri $attrUri -Method Get -Headers $headers -ErrorAction Stop
+                                $attrValue = if ($attrResponse.Content -is [byte[]]) {
+                                    [System.Text.Encoding]::UTF8.GetString($attrResponse.Content)
+                                }
+                                else {
+                                    $attrResponse.Content
+                                }
+
+                                if ([string]::IsNullOrWhiteSpace($attrValue)) {
+                                    $attributesResult[$attrName] = $null
+                                }
+                                else {
+                                    $attributesResult[$attrName] = $attrValue
+                                }
+                            }
+                            catch {
+                                $attributesResult[$attrName] = $null
+                                Write-Verbose "Failed to retrieve attribute '$attrName': $($_.Exception.Message)"
+                            }
+                        }
+                    }
+                    catch {
+                        Write-Verbose "Failed to retrieve attribute list: $($_.Exception.Message)"
+                    }
+                }
+                else {
+                    # Fetch specific attributes from comma-separated list
+                    $attrList = $Attributes -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                    Write-Verbose "Fetching specific attributes: $($attrList -join ', ')"
+
+                    foreach ($attrName in $attrList) {
+                        $uri = "$baseUrl/users/$userId/devices/$connectorGuid/attributes/$attrName"
+                        Write-Verbose "Fetching attribute '$attrName' from: $uri"
+
+                        try {
+                            $webResponse = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+                            $attrValue = if ($webResponse.Content -is [byte[]]) {
+                                [System.Text.Encoding]::UTF8.GetString($webResponse.Content)
+                            }
+                            else {
+                                $webResponse.Content
+                            }
+
+                            # Check if the value is empty
+                            if ([string]::IsNullOrWhiteSpace($attrValue)) {
+                                $attributesResult[$attrName] = $null
+                                Write-Verbose "Attribute '$attrName' has empty value"
+                            }
+                            else {
+                                $attributesResult[$attrName] = $attrValue
+                                Write-Verbose "Retrieved attribute '$attrName': $($attrValue.Substring(0, [Math]::Min(50, $attrValue.Length)))..."
+                            }
+                        }
+                        catch {
+                            # Return null for attributes that don't exist or have errors
+                            $attributesResult[$attrName] = $null
+                            Write-Verbose "Failed to retrieve attribute '$attrName': $($_.Exception.Message)"
+                        }
+                    }
+                }
+            }
+
+            # Parse and filter configuration if -Workload is specified
+            $parsedConfig = $null
+            if ($Workload -and $configXml) {
+                Write-Verbose "Parsing configuration JSON and filtering by workloads: $($Workload -join ', ')"
+                try {
+                    $fullConfig = $configXml | ConvertFrom-Json -AsHashtable
+                    $filteredConfig = @{}
+
+                    foreach ($w in $Workload) {
+                        $jsonKey = $script:WorkloadToJsonKey[$w]
+                        if ($fullConfig.ContainsKey($jsonKey)) {
+                            $filteredConfig[$w] = $fullConfig[$jsonKey]
+                            Write-Verbose "Added workload '$w' (JSON key: $jsonKey) to filtered configuration"
+                        }
+                        else {
+                            Write-Verbose "Workload '$w' (JSON key: $jsonKey) not found in configuration - skipping"
+                        }
+                    }
+
+                    # Convert hashtable to PSCustomObject for nicer output
+                    $parsedConfig = [PSCustomObject]$filteredConfig
+                }
+                catch {
+                    Write-Warning "Failed to parse configuration as JSON: $($_.Exception.Message)"
+                    $parsedConfig = $null
+                }
+            }
+
+            # Return result object
+            [PSCustomObject]@{
+                ConnectorGuid    = $connectorGuid
+                Name             = $connectorName
+                Type             = $connectorType
+                TypeDisplayName  = Get-ConnectorTypeDisplayName -ConnectorType $connectorType
+                RawConfiguration = $configXml
+                Configuration    = $parsedConfig
+                Attributes       = $attributesResult
+            }
+        }
+        catch {
+            $errorGuid = if ($connectorGuid) { $connectorGuid } else { $Connector }
+            throw "Failed to retrieve configuration for connector '$errorGuid': $($_.Exception.Message)"
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Updates the configuration for a Keepit connector
+.DESCRIPTION
+    Sets the configuration JSON for a specified Keepit connector using the device attributes API.
+    The configuration is stored as the ng_backup_config attribute for M365 and Dynamics 365 connectors,
+    or backup_config for Azure AD and Power BI connectors.
+
+    Supports pipeline input from Get-KeepitConnector for the connector identity.
+.PARAMETER Connector
+    The connector name or GUID. Can be piped from Get-KeepitConnector.
+    Aliases: ConnectorGuid, Name
+.PARAMETER RawConfiguration
+    The JSON configuration string to set. Maximum 64K length. Optional.
+    This should be a valid JSON structure matching the connector type's expected format.
+    If not provided, the current configuration will be fetched and modification parameters
+    (such as -AutoIncludeSites, -AddIncludedSites, etc.) will be applied to it.
+.PARAMETER Workload
+    The workload to target for modification. For Microsoft 365 connectors, valid values are:
+    Exchange, OneDrive, SharePoint, Teams.
+.PARAMETER AutoIncludeSites
+    Controls the AutoIncludeAllSiteCollections setting for SharePoint configuration.
+    - $true: Enables automatic inclusion of all site collections
+    - $false: Disables automatic inclusion (removes the setting if present)
+    When this parameter is used without -RawConfiguration, the current configuration
+    is fetched, modified, and saved back.
+.EXAMPLE
+    Set-KeepitConnectorConfiguration -Connector "abc123-def456" -RawConfiguration $jsonConfig
+
+    Sets the configuration for the specified connector by GUID.
+.EXAMPLE
+    Set-KeepitConnectorConfiguration -Connector "Production M365" -RawConfiguration $jsonConfig
+
+    Sets the configuration for a connector by name.
+.EXAMPLE
+    Set-KeepitConnectorConfiguration -Connector "Production M365" -AutoIncludeSites $true
+
+    Enables automatic inclusion of all SharePoint site collections for the connector.
+.EXAMPLE
+    Set-KeepitConnectorConfiguration -Connector "Production M365" -AutoIncludeSites $false
+
+    Disables automatic inclusion of SharePoint site collections.
+.EXAMPLE
+    # Read, modify, and save configuration
+    $current = Get-KeepitConnectorConfiguration -Connector "abc123"
+    $config = $current.RawConfiguration | ConvertFrom-Json
+    $config.Exchange.EnabledCategories += "InPlaceArchive"
+    $newJson = $config | ConvertTo-Json -Depth 10
+    Set-KeepitConnectorConfiguration -Connector "abc123" -RawConfiguration $newJson
+
+    Reads current configuration, modifies it, and saves it back.
+.EXAMPLE
+    Get-KeepitConnectorConfiguration -Connector "Source M365" |
+        ForEach-Object { Set-KeepitConnectorConfiguration -Connector "Target M365" -RawConfiguration $_.RawConfiguration }
+
+    Copies configuration from one connector to another.
+.OUTPUTS
+    PSCustomObject with properties:
+        - ConnectorGuid: The connector GUID (lowercase)
+        - Name: The connector name
+        - Type: The connector type
+        - TypeDisplayName: Human-readable connector type
+        - Status: "Success" or error message
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+    Configuration is sent to the API as-is; invalid JSON will cause an error.
+    The API does not validate the configuration structure - ensure the JSON matches
+    the expected format for the connector type.
+
+    API endpoint used:
+    - PUT /users/{userId}/devices/{connectorGUID}/attributes/ng_backup_config
+      (for o365-admin and dynamics365 connectors)
+    - PUT /users/{userId}/devices/{connectorGUID}/attributes/backup_config
+      (for azure-ad and powerbi connectors)
+#>
+function Set-KeepitConnectorConfiguration {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('ConnectorGuid', 'Name')]
+        [string]$Connector,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateNotNullOrEmpty()]
+        [ValidateScript({
+            if ($_.Length -gt 65536) {
+                throw "RawConfiguration exceeds maximum length of 64K"
+            }
+            # Basic JSON validation
+            try {
+                $null = $_ | ConvertFrom-Json
+                $true
+            }
+            catch {
+                throw "RawConfiguration must be valid JSON: $($_.Exception.Message)"
+            }
+        })]
+        [string]$RawConfiguration,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Workload,
+
+        # SharePoint configuration parameters
+        [Parameter(Mandatory = $false)]
+        [bool]$AutoIncludeSites,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$AddIncludedSites,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$RemoveIncludedSites,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$AddExcludedSites,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$RemoveExcludedSites,
+
+        # Teams/UnifiedGroups configuration parameters
+        [Parameter(Mandatory = $false)]
+        [bool]$AutoIncludeGroups,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$AddIncludedGroups,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$RemoveIncludedGroups
+    )
+
+    begin {
+        Write-Verbose "Set-KeepitConnectorConfiguration: Initializing"
+
+        # Get authentication header and base URL once for all pipeline items
+        try {
+            $authHeader = Get-AuthHeader
+            $baseUrl = Get-KeepitBaseUrl
+            $userId = Get-KeepitUserId -AuthHeader $authHeader -BaseUrl $baseUrl
+            Write-Verbose "Base URL: $baseUrl, User ID: $userId"
+        }
+        catch {
+            throw "Failed to initialize: $($_.Exception.Message)"
+        }
+    }
+
+    process {
+        try {
+            # Resolve connector identity to GUID
+            $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $connectorGuid = $resolved.ConnectorGuid
+            $connectorName = $resolved.Name
+            $connectorType = $resolved.Type
+            Write-Verbose "Connector: $connectorName ($connectorGuid, Type: $connectorType)"
+
+            # Handle connector type-specific logic
+            $configAttribute = switch ($connectorType) {
+                'o365-admin' {
+                    # Microsoft 365 connectors - fully supported
+                    'ng_backup_config'
+                }
+                'dynamics365' {
+                    # Dynamics 365 - not yet supported for Set operations
+                    throw "Currently this cmdlet only supports Microsoft 365 connectors."
+                }
+                'azure-ad' {
+                    # Entra ID - not yet supported for Set operations
+                    throw "Currently this cmdlet only supports Microsoft 365 connectors."
+                }
+                'powerbi' {
+                    # Power BI - not yet supported for Set operations
+                    throw "Currently this cmdlet only supports Microsoft 365 connectors."
+                }
+                default {
+                    # All other connector types are not supported
+                    throw "Currently this cmdlet only supports Microsoft 365 connectors."
+                }
+            }
+            Write-Verbose "Using config attribute: $configAttribute for connector type: $connectorType"
+
+            # Validate -Workload parameter if specified (single value only for Set-)
+            if ($Workload) {
+                Test-WorkloadParameter -Workload @($Workload) -ConnectorType $connectorType
+            }
+
+            # Check if site list parameters are specified
+            $hasSiteListParams = $PSBoundParameters.ContainsKey('AddIncludedSites') -or
+                                 $PSBoundParameters.ContainsKey('RemoveIncludedSites') -or
+                                 $PSBoundParameters.ContainsKey('AddExcludedSites') -or
+                                 $PSBoundParameters.ContainsKey('RemoveExcludedSites')
+
+            # Validate site list parameters require SharePoint workload
+            if ($hasSiteListParams) {
+                if ($Workload -ne 'SharePoint') {
+                    throw "You can only modify included and excluded site lists when setting a SharePoint configuration"
+                }
+
+                # Validate all URLs in site list parameters
+                $allUrls = @()
+                if ($AddIncludedSites) { $allUrls += $AddIncludedSites }
+                if ($RemoveIncludedSites) { $allUrls += $RemoveIncludedSites }
+                if ($AddExcludedSites) { $allUrls += $AddExcludedSites }
+                if ($RemoveExcludedSites) { $allUrls += $RemoveExcludedSites }
+
+                foreach ($url in $allUrls) {
+                    Test-SiteUrl -Url $url
+                }
+            }
+
+            # Check if group list parameters are specified
+            $hasGroupListParams = $PSBoundParameters.ContainsKey('AddIncludedGroups') -or
+                                  $PSBoundParameters.ContainsKey('RemoveIncludedGroups')
+
+            # Check if any Teams/UnifiedGroups modification parameters are specified
+            $hasTeamsParams = $PSBoundParameters.ContainsKey('AutoIncludeGroups') -or $hasGroupListParams
+
+            # Validate group list parameters require Teams or UnifiedGroups workload
+            if ($hasGroupListParams) {
+                if ($Workload -notin @('Teams', 'UnifiedGroups')) {
+                    throw "You can only modify included group lists when setting a Teams configuration"
+                }
+
+                # Validate all GUIDs in group list parameters
+                $allGuids = @()
+                if ($AddIncludedGroups) { $allGuids += $AddIncludedGroups }
+                if ($RemoveIncludedGroups) { $allGuids += $RemoveIncludedGroups }
+
+                foreach ($guid in $allGuids) {
+                    Test-GroupGuid -Guid $guid
+                }
+            }
+
+            # Validate AutoIncludeGroups requires Teams or UnifiedGroups workload
+            if ($PSBoundParameters.ContainsKey('AutoIncludeGroups')) {
+                if ($Workload -notin @('Teams', 'UnifiedGroups')) {
+                    throw "The -AutoIncludeGroups parameter is only valid when -Workload is Teams or UnifiedGroups"
+                }
+            }
+
+            # Check if any modification parameters were specified
+            $hasModificationParams = $PSBoundParameters.ContainsKey('AutoIncludeSites') -or $hasSiteListParams -or $hasTeamsParams
+
+            # Determine if we need to fetch current configuration
+            # This is needed when using modification parameters (e.g., AutoIncludeSites, site list changes)
+            # rather than providing a complete RawConfiguration
+            $effectiveRawConfig = $RawConfiguration
+            if (-not $RawConfiguration) {
+                # No RawConfiguration provided - check if we have modification parameters
+                if (-not $hasModificationParams) {
+                    throw "No configuration changes specified. Provide -RawConfiguration or use modification parameters."
+                }
+
+                # Fetch current configuration for modification
+                Write-Verbose "No RawConfiguration provided - fetching current configuration for modification"
+
+                $getParams = @{
+                    Connector = $connectorGuid
+                }
+
+                try {
+                    $currentConfig = Get-KeepitConnectorConfiguration @getParams
+                    $effectiveRawConfig = $currentConfig.RawConfiguration
+
+                    if (-not $effectiveRawConfig) {
+                        throw "Failed to retrieve current configuration - no configuration data returned"
+                    }
+
+                    Write-Verbose "Retrieved current configuration: $($effectiveRawConfig.Length) characters"
+                }
+                catch {
+                    throw "Failed to retrieve current configuration for connector '$connectorGuid': $($_.Exception.Message)"
+                }
+            }
+
+            # Apply modification parameters if specified
+            if ($hasModificationParams) {
+                Write-Verbose "Applying modification parameters to configuration"
+
+                # Parse configuration as JSON
+                try {
+                    $configObj = $effectiveRawConfig | ConvertFrom-Json -AsHashtable
+                }
+                catch {
+                    throw "Failed to parse configuration as JSON: $($_.Exception.Message)"
+                }
+
+                # Check for INFO message when site list params used with AutoIncludeAllSiteCollections
+                if ($hasSiteListParams) {
+                    $spConfig = $configObj['SharePointNG']
+                    if ($spConfig -and $spConfig.ContainsKey('AutoIncludeAllSiteCollections')) {
+                        Write-Information "INFO: this configuration has AutoIncludeAllSiteCollections set; this may have unexpected results when manually including or excluding sites." -InformationAction Continue
+                    }
+                }
+
+                # Apply AutoIncludeSites modification
+                if ($PSBoundParameters.ContainsKey('AutoIncludeSites')) {
+                    Write-Verbose "Processing AutoIncludeSites parameter: $AutoIncludeSites"
+
+                    # Ensure SharePointNG section exists
+                    if (-not $configObj.ContainsKey('SharePointNG')) {
+                        $configObj['SharePointNG'] = @{}
+                    }
+
+                    $spConfig = $configObj['SharePointNG']
+                    $hasAutoInclude = $spConfig.ContainsKey('AutoIncludeAllSiteCollections')
+
+                    if ($AutoIncludeSites -eq $true) {
+                        if ($hasAutoInclude) {
+                            Write-Verbose "AutoIncludeAllSiteCollections already present - no change needed"
+                        }
+                        else {
+                            Write-Verbose "Adding AutoIncludeAllSiteCollections = true"
+                            $spConfig['AutoIncludeAllSiteCollections'] = $true
+                        }
+                    }
+                    else {
+                        # AutoIncludeSites is $false
+                        if (-not $hasAutoInclude) {
+                            Write-Verbose "AutoIncludeAllSiteCollections not present - no change needed"
+                        }
+                        else {
+                            Write-Verbose "Removing AutoIncludeAllSiteCollections"
+                            $spConfig.Remove('AutoIncludeAllSiteCollections')
+                        }
+                    }
+                }
+
+                # Check for INFO message when group list params used with AutoIncludeGroups
+                if ($hasGroupListParams) {
+                    $ugConfig = $configObj['UnifiedGroups']
+                    if ($ugConfig -and $ugConfig['AutoIncludeGroups'] -eq $true) {
+                        Write-Information "INFO: this configuration has AutoIncludeGroups set to true; manually including groups may have unexpected results." -InformationAction Continue
+                    }
+                }
+
+                # Apply AutoIncludeGroups modification
+                if ($PSBoundParameters.ContainsKey('AutoIncludeGroups')) {
+                    Write-Verbose "Processing AutoIncludeGroups parameter: $AutoIncludeGroups"
+
+                    # Ensure UnifiedGroups section exists
+                    if (-not $configObj.ContainsKey('UnifiedGroups')) {
+                        $configObj['UnifiedGroups'] = @{}
+                    }
+
+                    $ugConfig = $configObj['UnifiedGroups']
+                    $ugConfig['AutoIncludeGroups'] = $AutoIncludeGroups
+                    Write-Verbose "Set AutoIncludeGroups = $AutoIncludeGroups"
+                }
+
+                # Apply AddIncludedGroups modification
+                if ($PSBoundParameters.ContainsKey('AddIncludedGroups') -and $AddIncludedGroups.Count -gt 0) {
+                    Write-Verbose "Processing AddIncludedGroups parameter: $($AddIncludedGroups.Count) groups"
+
+                    # Ensure UnifiedGroups section exists
+                    if (-not $configObj.ContainsKey('UnifiedGroups')) {
+                        $configObj['UnifiedGroups'] = @{}
+                    }
+
+                    $ugConfig = $configObj['UnifiedGroups']
+
+                    # Get existing IncludeGroups array or create new one
+                    if (-not $ugConfig.ContainsKey('IncludeGroups')) {
+                        $ugConfig['IncludeGroups'] = @()
+                    }
+
+                    $existingGroups = [System.Collections.ArrayList]@($ugConfig['IncludeGroups'])
+
+                    foreach ($groupGuid in $AddIncludedGroups) {
+                        $normalizedGuid = $groupGuid.ToLowerInvariant()
+                        $alreadyExists = $existingGroups | Where-Object { $_.ToLowerInvariant() -eq $normalizedGuid }
+                        if (-not $alreadyExists) {
+                            $null = $existingGroups.Add($groupGuid)
+                            Write-Verbose "Added group: $groupGuid"
+                        }
+                        else {
+                            Write-Verbose "Group already exists, skipping: $groupGuid"
+                        }
+                    }
+
+                    $ugConfig['IncludeGroups'] = @($existingGroups)
+                }
+
+                # Apply RemoveIncludedGroups modification
+                if ($PSBoundParameters.ContainsKey('RemoveIncludedGroups') -and $RemoveIncludedGroups.Count -gt 0) {
+                    Write-Verbose "Processing RemoveIncludedGroups parameter: $($RemoveIncludedGroups.Count) groups"
+
+                    $ugConfig = $configObj['UnifiedGroups']
+                    if ($ugConfig -and $ugConfig.ContainsKey('IncludeGroups')) {
+                        $existingGroups = [System.Collections.ArrayList]@($ugConfig['IncludeGroups'])
+                        $guidsToRemove = $RemoveIncludedGroups | ForEach-Object { $_.ToLowerInvariant() }
+
+                        $remainingGroups = $existingGroups | Where-Object {
+                            $_.ToLowerInvariant() -notin $guidsToRemove
+                        }
+
+                        $ugConfig['IncludeGroups'] = @($remainingGroups)
+                        Write-Verbose "Removed groups, remaining: $($remainingGroups.Count)"
+                    }
+                    else {
+                        Write-Verbose "No IncludeGroups array found, nothing to remove"
+                    }
+                }
+
+                # Convert back to JSON
+                $effectiveRawConfig = $configObj | ConvertTo-Json -Depth 10 -Compress
+                Write-Verbose "Modified configuration: $($effectiveRawConfig.Length) characters"
+            }
+
+            # Build request URI
+            $uri = "$baseUrl/users/$userId/devices/$connectorGuid/attributes/$configAttribute"
+            Write-Verbose "PUT URI: $uri"
+
+            # Prepare headers
+            $headers = @{
+                'Authorization' = $authHeader
+                'Content-Type'  = 'application/octet-stream'
+            }
+
+            # Convert JSON string to bytes for the request body
+            $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($effectiveRawConfig)
+            Write-Verbose "Request body size: $($bodyBytes.Length) bytes"
+            Write-Verbose "Configuration preview: $($effectiveRawConfig.Substring(0, [Math]::Min(200, $effectiveRawConfig.Length)))..."
+
+            # ShouldProcess check
+            $displayName = Get-ConnectorTypeDisplayName -ConnectorType $connectorType
+            if ($PSCmdlet.ShouldProcess("$connectorName ($connectorGuid)", "Set $displayName configuration")) {
+                Write-Verbose "Making PUT request to set configuration..."
+
+                try {
+                    $response = Invoke-WebRequest -Uri $uri -Method Put -Headers $headers -Body $bodyBytes -ErrorAction Stop
+                    Write-Verbose "Response status: $($response.StatusCode) $($response.StatusDescription)"
+
+                    # Return success object
+                    [PSCustomObject]@{
+                        ConnectorGuid   = $connectorGuid
+                        Name            = $connectorName
+                        Type            = $connectorType
+                        TypeDisplayName = $displayName
+                        Status          = 'Success'
+                    }
+                }
+                catch {
+                    $errorMessage = $_.Exception.Message
+                    if ($_.ErrorDetails.Message) {
+                        $errorMessage = $_.ErrorDetails.Message
+                    }
+                    Write-Verbose "API Error: $errorMessage"
+                    Write-Verbose "Response: $($_.Exception.Response)"
+
+                    # Return error object
+                    [PSCustomObject]@{
+                        ConnectorGuid   = $connectorGuid
+                        Name            = $connectorName
+                        Type            = $connectorType
+                        TypeDisplayName = $displayName
+                        Status          = "Error: $errorMessage"
+                    }
+                }
+            }
+        }
+        catch {
+            $errorGuid = if ($connectorGuid) { $connectorGuid } else { $Connector }
+            throw "Failed to set configuration for connector '$errorGuid': $($_.Exception.Message)"
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Enables a Keepit connector by clearing the disable_backup attribute
+.DESCRIPTION
+    Enables a Keepit connector by removing the disable_backup attribute, allowing backup
+    jobs to run on the connector. If the connector is already enabled (no disable_backup
+    attribute), the cmdlet succeeds without making changes.
+
+    Supports pipeline input from Get-KeepitConnector for bulk operations.
+.PARAMETER Connector
+    The connector name or GUID. Can be piped from Get-KeepitConnector.
+    Aliases: ConnectorGuid, Name
+.EXAMPLE
+    Enable-KeepitConnector -Connector "abc123-def456"
+
+    Enables the connector with the specified GUID.
+.EXAMPLE
+    Enable-KeepitConnector -Connector "Production M365"
+
+    Enables the connector by name.
+.EXAMPLE
+    Get-KeepitConnector | Where-Object { $_.Name -like "*Test*" } | Enable-KeepitConnector
+
+    Enables all connectors matching the name pattern.
+.OUTPUTS
+    PSCustomObject with properties:
+        - ConnectorGuid: The connector GUID (lowercase)
+        - Name: The connector name
+        - Enabled: Boolean indicating the connector is now enabled ($true)
+        - Status: "Success" or error message
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+    Enabling an already-enabled connector is a no-op and returns success.
+
+    API endpoint used:
+    - DELETE /users/{userId}/devices/{connectorGUID}/attributes/disable_backup
+#>
+function Enable-KeepitConnector {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('ConnectorGuid', 'Name')]
+        [string]$Connector
+    )
+
+    begin {
+        Write-Verbose "Enable-KeepitConnector: Initializing"
+
+        # Get authentication header and base URL once for all pipeline items
+        try {
+            $authHeader = Get-AuthHeader
+            $baseUrl = Get-KeepitBaseUrl
+            $userId = Get-KeepitUserId -AuthHeader $authHeader -BaseUrl $baseUrl
+            Write-Verbose "Base URL: $baseUrl, User ID: $userId"
+        }
+        catch {
+            throw "Failed to initialize: $($_.Exception.Message)"
+        }
+    }
+
+    process {
+        try {
+            # Resolve connector identity to GUID
+            $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $connectorGuid = $resolved.ConnectorGuid
+            $connectorName = $resolved.Name
+            Write-Verbose "Connector: $connectorName ($connectorGuid)"
+
+            # Check if disable_backup attribute exists
+            $attrUri = "$baseUrl/users/$userId/devices/$connectorGuid/attributes/disable_backup"
+            $headers = @{
+                'Authorization' = $authHeader
+            }
+
+            $attributeExists = $false
+            try {
+                $response = Invoke-WebRequest -Uri $attrUri -Method Get -Headers $headers -ErrorAction Stop
+                $attributeExists = $true
+                Write-Verbose "disable_backup attribute exists, will delete it"
+            }
+            catch {
+                # Attribute doesn't exist - connector is already enabled
+                Write-Verbose "disable_backup attribute not found - connector is already enabled"
+            }
+
+            # Delete the attribute if it exists
+            if ($attributeExists) {
+                Write-Verbose "Deleting disable_backup attribute"
+                try {
+                    Invoke-RestMethod -Uri $attrUri -Method Delete -Headers $headers -ErrorAction Stop
+                    Write-Verbose "Successfully deleted disable_backup attribute"
+                }
+                catch {
+                    throw "Failed to delete disable_backup attribute: $($_.Exception.Message)"
+                }
+            }
+
+            # Return result object
+            [PSCustomObject]@{
+                ConnectorGuid = $connectorGuid
+                Name          = $connectorName
+                Enabled       = $true
+                Status        = 'Success'
+            }
+        }
+        catch {
+            Write-Error "Failed to enable connector '$Connector': $($_.Exception.Message)"
+
+            [PSCustomObject]@{
+                ConnectorGuid = $connectorGuid
+                Name          = $connectorName
+                Enabled       = $null
+                Status        = $_.Exception.Message
+            }
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Disables a Keepit connector by setting the disable_backup attribute
+.DESCRIPTION
+    Disables a Keepit connector by setting the disable_backup attribute to TRUE,
+    preventing backup jobs from running on the connector. If the connector is already
+    disabled (disable_backup attribute exists), the cmdlet succeeds without making changes.
+
+    Supports pipeline input from Get-KeepitConnector for bulk operations.
+.PARAMETER Connector
+    The connector name or GUID. Can be piped from Get-KeepitConnector.
+    Aliases: ConnectorGuid, Name
+.EXAMPLE
+    Disable-KeepitConnector -Connector "abc123-def456"
+
+    Disables the connector with the specified GUID.
+.EXAMPLE
+    Disable-KeepitConnector -Connector "Test Connector"
+
+    Disables the connector by name.
+.EXAMPLE
+    Get-KeepitConnector | Where-Object { $_.Name -like "*Test*" } | Disable-KeepitConnector
+
+    Disables all connectors matching the name pattern.
+.OUTPUTS
+    PSCustomObject with properties:
+        - ConnectorGuid: The connector GUID (lowercase)
+        - Name: The connector name
+        - Enabled: Boolean indicating the connector is now disabled ($false)
+        - Status: "Success" or error message
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+    Disabling an already-disabled connector is a no-op and returns success.
+    Active backup jobs may continue running but will not be rescheduled.
+
+    API endpoint used:
+    - PUT /users/{userId}/devices/{connectorGUID}/attributes/disable_backup
+#>
+function Disable-KeepitConnector {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('ConnectorGuid', 'Name')]
+        [string]$Connector
+    )
+
+    begin {
+        Write-Verbose "Disable-KeepitConnector: Initializing"
+
+        # Get authentication header and base URL once for all pipeline items
+        try {
+            $authHeader = Get-AuthHeader
+            $baseUrl = Get-KeepitBaseUrl
+            $userId = Get-KeepitUserId -AuthHeader $authHeader -BaseUrl $baseUrl
+            Write-Verbose "Base URL: $baseUrl, User ID: $userId"
+        }
+        catch {
+            throw "Failed to initialize: $($_.Exception.Message)"
+        }
+    }
+
+    process {
+        try {
+            # Resolve connector identity to GUID
+            $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $connectorGuid = $resolved.ConnectorGuid
+            $connectorName = $resolved.Name
+            Write-Verbose "Connector: $connectorName ($connectorGuid)"
+
+            # Check if disable_backup attribute exists
+            $attrUri = "$baseUrl/users/$userId/devices/$connectorGuid/attributes/disable_backup"
+            $headers = @{
+                'Authorization' = $authHeader
+            }
+
+            $attributeExists = $false
+            try {
+                $response = Invoke-WebRequest -Uri $attrUri -Method Get -Headers $headers -ErrorAction Stop
+                $attributeExists = $true
+                Write-Verbose "disable_backup attribute already exists - connector is already disabled"
+            }
+            catch {
+                # Attribute doesn't exist - need to create it
+                Write-Verbose "disable_backup attribute not found - will create it"
+            }
+
+            # Set the attribute if it doesn't exist
+            if (-not $attributeExists) {
+                Write-Verbose "Setting disable_backup attribute to 1"
+                $putHeaders = @{
+                    'Authorization' = $authHeader
+                    'Content-Type'  = 'application/octet-stream'
+                }
+
+                try {
+                    $body = [System.Text.Encoding]::UTF8.GetBytes("1")
+                    Invoke-RestMethod -Uri $attrUri -Method Put -Headers $putHeaders -Body $body -ErrorAction Stop
+                    Write-Verbose "Successfully set disable_backup attribute"
+                }
+                catch {
+                    throw "Failed to set disable_backup attribute: $($_.Exception.Message)"
+                }
+            }
+
+            # Return result object
+            [PSCustomObject]@{
+                ConnectorGuid = $connectorGuid
+                Name          = $connectorName
+                Enabled       = $false
+                Status        = 'Success'
+            }
+        }
+        catch {
+            Write-Error "Failed to disable connector '$Connector': $($_.Exception.Message)"
+
+            [PSCustomObject]@{
+                ConnectorGuid = $connectorGuid
+                Name          = $connectorName
+                Enabled       = $null
+                Status        = $_.Exception.Message
+            }
+        }
+    }
+}
+
+#endregion
+
+# Export module members
+Export-ModuleMember -Function @(
+    'Connect-KeepitService',
+    'Disconnect-KeepitService',
+    'Get-KeepitConnector',
+    'Get-KeepitConnectorConfiguration',
+    'Set-KeepitConnectorConfiguration',
+    'Get-KeepitSnapshot',
+    'Get-KeepitJobs',
+    'Start-KeepitBackup',
+    'Submit-KeepitJob',
+    'Restore-KeepitBulkDeletedItems',
+    'Search-KeepitSnapshot',
+    'Convert-KeepitUPNToGuid',
+    'Enable-KeepitConnector',
+    'Disable-KeepitConnector'
+)
