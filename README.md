@@ -115,7 +115,7 @@ Remove-Module KeepitTools
 | `Disconnect-KeepitService`         | Closes connection and clears cached credentials                    |
 | `Get-KeepitConnector`              | Retrieves accessible connectors, optionally filtered by type       |
 | `Get-KeepitConnectorConfiguration` | Retrieves connector configuration with optional workload filtering |
-| `Set-KeepitConnectorConfiguration` | **Experimental**: updates connector configuration with JSON        |
+| `Set-KeepitConnectorConfiguration` | Updates connector configuration to add/remove objects or attributes|
 | `Get-KeepitSnapshot`               | Retrieves snapshot information (latest, range, or count)           |
 | `Get-KeepitJobs`                   | Retrieves active and future backup/restore jobs for a connector    |
 | `Start-KeepitBackup`               | Starts immediate backup job on a connector                         |
@@ -152,14 +152,14 @@ Get-KeepitConnector | Get-KeepitSnapshot -Latest
 
 ```powershell
 # Get snapshot counts for the last 30 days across all connectors
-Get-KeepitConnector | Get-KeepitSnapshot -StartDate (Get-Date).AddDays(-30) -EndDate (Get-Date) -CountOnly
+Get-KeepitConnector | Get-KeepitSnapshot -StartTime (Get-Date).AddDays(-30) -EndTime (Get-Date) -CountOnly
 ```
 
 ### Get Snapshots in a Date Range
 
 ```powershell
 # Get all snapshots for a specific connector in the last week
-Get-KeepitSnapshot -Connector "your-connector-guid" -StartDate (Get-Date).AddDays(-7) -EndDate (Get-Date)
+Get-KeepitSnapshot -Connector "your-connector-guid" -StartTime (Get-Date).AddDays(-7) -EndTime (Get-Date)
 ```
 
 ### Get Jobs
@@ -172,10 +172,10 @@ Get-KeepitJobs -Connector "your-connector-guid"
 Get-KeepitJobs -Connector "your-connector-guid" -Type backup
 
 # Get all jobs (past and future) from the last 7 days
-Get-KeepitJobs -Connector "your-connector-guid" -StartDate (Get-Date).AddDays(-7) -EndDate (Get-Date)
+Get-KeepitJobs -Connector "your-connector-guid" -StartTime (Get-Date).AddDays(-7) -EndTime (Get-Date)
 
 # Get all backup jobs from December 2025
-Get-KeepitJobs -Connector "your-connector-guid" -Type backup -StartDate "2025-12-01" -EndDate "2025-12-31"
+Get-KeepitJobs -Connector "your-connector-guid" -Type backup -StartTime "2025-12-01" -EndTime "2025-12-31"
 
 # Get active and future jobs for all connectors via pipeline
 Get-KeepitConnector | Get-KeepitJobs
@@ -255,7 +255,7 @@ Get-KeepitConnectorConfiguration -Connector "Production M365" -Attributes "ng_ba
 
 #### Workload Parameter
 
-The `-Workload` parameter filters and parses the configuration by specific workloads, returning a PSCustomObject. Valid workloads vary by connector type:
+When working with connector configurations, you will often want to use the `-Workload` parameter to filter / parse the configuration by specific workloads, returning a PSCustomObject. Valid workloads vary by connector type:
 
 | Connector Type             | Valid Workloads                       |
 | -------------------------- | ------------------------------------- |
@@ -266,7 +266,55 @@ The `-Workload` parameter filters and parses the configuration by specific workl
 
 ### Set Connector Configuration
 
-The Set-KeepitConnectorConfiguration cmdlet is experimental and does _not_ write any configuration data back to the service yet. That means it's harmless but also not useful yet.
+Use the `Set-KeepitConnectorConfiguration` cmdlet to modify connector backup settings. You can either provide a complete JSON configuration (which isn't recomnended) or use parameters to incrementally add/remove sites or groups.
+
+Note that these configuration changes do _not_ affect running backup jobs. If you have the connector configuration dialog open in the Keepit admin center
+while running these cmdlets, the cmdlet configuration changes may be overwritten when you click the "Save" button.
+
+**SharePoint site management:**
+
+These parameters require you to specify `-workload SharePoint`. Site URLs must be complete FQDNs. If you specify a site that already exists in the configuration,
+e.g. trying to add a site that's already included for backup, that site will be skipped.
+
+```powershell
+# Add a SharePoint site to backup
+Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload SharePoint -AddIncludedSites "https://contoso.sharepoint.com/sites/Marketing"
+
+# Remove a site from backup
+Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload SharePoint -RemoveIncludedSites "https://contoso.sharepoint.com/sites/OldSite"
+
+# Add multiple sites at once
+$sites = @("https://contoso.sharepoint.com/sites/HR", "https://contoso.sharepoint.com/sites/Finance")
+Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload SharePoint -AddIncludedSites $sites
+
+# Exclude a site from backup
+Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload SharePoint -AddExcludedSites "https://contoso.sharepoint.com/sites/Archive"
+```
+
+**Teams/Microsoft 365 Groups management:**
+
+These parameters require you to specify `-workload Teams`. You need to provide the Microsoft GUID for the Team/Group object that you want to add or remove.
+```powershell
+# Exclude a group from Teams backup
+Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload Teams -AddExcludedGroups "0aa94c0a-c5e5-417f-8cfa-6744649e25da"
+
+# Remove a group from the exclusion list
+Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload Teams -RemoveExcludedGroups "0aa94c0a-c5e5-417f-8cfa-6744649e25da"
+
+# Include specific groups (when AutoIncludeGroups is false)
+Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload Teams -AddIncludedGroups "abc123-def456-789012"
+```
+
+**Preview changes with -WhatIf:**
+The `-WhatIf` flag will show you what changes would be made to the configuration but doesn't actually write the changes to the Keepit service. It's a good idea
+to use this first to make sure you'll get the expected set of sites/groups in the resulting configuration.
+
+```powershell
+# See the configuration that would be written without making changes
+Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload SharePoint -AddIncludedSites $sites -WhatIf
+```
+
+The cmdlet shows warnings when adding items that already exist or removing items that don't exist, and skips the write if no actual changes were made.
 
 ### Search Backup Data
 
@@ -287,17 +335,17 @@ Search-KeepitSnapshot -Connector "your-connector-guid" -RootPath "/Users/user@ex
 
 ```powershell
 # Restore deleted email items for a single user
-Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "your-connector-guid" -RootPath "Inbox" -StartDate "2024-01-01" -EndDate "2024-12-31"
+Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "your-connector-guid" -RootPath "Inbox" -StartTime "2024-01-01" -EndTime "2024-12-31"
 
 # Restore deleted items for multiple users from a CSV file
 # CSV should have columns like UPN, Email, or UserPrincipalName
-Import-Csv users.csv | Restore-KeepitBulkDeletedItems -Connector "your-connector-guid" -RootPath "Inbox" -StartDate "2024-01-01" -EndDate "2024-12-31"
+Import-Csv users.csv | Restore-KeepitBulkDeletedItems -Connector "your-connector-guid" -RootPath "Inbox" -StartTime "2024-01-01" -EndTime "2024-12-31"
 
 # Restore deleted OneDrive files for a user
-Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "your-odb-connector" -RootPath "OneDrive" -Type OneDrive -StartDate "2024-01-01" -EndDate "2024-12-31" -Recursive
+Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "your-odb-connector" -RootPath "OneDrive" -Type OneDrive -StartTime "2024-01-01" -EndTime "2024-12-31" -Recursive
 
 # Preview what would be restored without actually restoring
-Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "your-connector-guid" -RootPath "Deleted Items" -StartDate (Get-Date).AddDays(-30) -EndDate (Get-Date) -WhatIf
+Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "your-connector-guid" -RootPath "Deleted Items" -StartTime (Get-Date).AddDays(-30) -EndTime (Get-Date) -WhatIf
 ```
 
 ## Searching snapshots
@@ -306,7 +354,7 @@ The `Search-KeepitSnapshot` cmdlet allows you to search a set of snapshots looki
 
 ```
 # get the time of the most recent snapshot from the desired connector
-Get-KeepitSnapshot -connector "ExO Only" -StartDate 2026-01-13 -EndDate 2026-01-13 -Reverse -ResultSize 1
+Get-KeepitSnapshot -connector "ExO Only" -StartTime 2026-01-13 -EndTime 2026-01-13 -Reverse -ResultSize 1
 
 Id            : 464eb1bee279152deadbeef7d06de5439172d1258008553fd247f75671a6636f
 Timestamp     : 2026-01-12T08:07:10Z
@@ -349,7 +397,7 @@ Here's a simple example of restoring deleted mail for a single user:
 
 ```
 Restore-KeepitBulkDeletedItems -connector "ExO Only" -UserPrincipalName paulr@blackdotpub.com `
-  -StartDate 2026-01-10 -EndDate 2026-01-13 -RootPath "Inbox"
+  -StartTime 2026-01-10 -EndTime 2026-01-13 -RootPath "Inbox"
 ```
 
 That tells the tool to find deleted email messages in the Inbox folder of the user `paulr@blackdotpub.com` that were deleted between midnight 10th January and midnight 13th January (that is, from 00:00Z on 10/01 until 23:59Z on 13/01). To restore messages in any folder below the Inbox, you would add the `-recursive` switch. But if you only wanted to restore messages in the "Travel" folder under Inbox, you wouldn't use `-recursive`; instead, you'd use `-RootPath Inbox\Travel`.
@@ -357,7 +405,7 @@ That tells the tool to find deleted email messages in the Inbox folder of the us
 You can use pipelining to fill the `-UserPrincipalName` value. If you wanted to restore all email deleted from the Inbox for a set of users, you'd create a CSV file containing their addresses and then do something like this:
 
 ```
-Import-CSV ./usersToRestore.csv | Restore-KeepitBulkDeletedItems -Connector "ExO Only" -rootPath "Inbox" -startDate 2026-01-01 -endDate 2026-01-10
+Import-CSV ./usersToRestore.csv | Restore-KeepitBulkDeletedItems -Connector "ExO Only" -rootPath "Inbox" -startTime 2026-01-01 -endTime 2026-01-10
 ```
 ### Restoring deleted files
 Currently OneDrive restores require you to specify the `-Type OneDrive` flag as well as a `RootPath` value. Due to a change in the way Microsoft creates OneDrives, older Keepit snapshots will have user OneDrive documents stored at a path of `/Users/_guid_/OneDrive/Documents`, but newer snapshots will use a path of `/Users/_guid_/OneDriveSP/DocLibs/Documents/Content`. The cmdlet is smart enough to use the new-style path if it doesn't find any deleted items at the old-style path _if you specify it_. It's probably best to default to use `-RootPath /OneDrive/` and let the cmdlet figure out what to do.
@@ -366,7 +414,7 @@ Here's an example of finding what files would be restored from a user:
 
 ```
 restore-keepitbulkdeleteditems -UserPrincipalName orphan01@blackdotpub.com -connector "PSTools ODB" -RootPath "/OneDrive/" `
-   -Startdate 2026-01-01 -enddate 2026-01-13T18:00 -whatif -Type onedrive
+   -StartTime 2026-01-01 -EndTime 2026-01-13T18:00 -whatif -Type onedrive
 WARNING: Search-KeepitSnapshot: No matching results found
 WhatIf: Would restore 2 items in 1 restore job(s)
   Snapshot 2026-01-13T16:49:10Z : 2 items
@@ -378,5 +426,3 @@ TotalItems JobCount ItemsBySnapshot
          2        1 {[2026-01-13T16:49:10Z, 2]}
 ```
 The extra "WARNING" message is Search-KeepitSnapshot saying it didn't find anything at the original /OneDrive/ path; this is expected. In this case, the tool found 2 deleted files that were deleted within a single snapshot period, so they could be restored in a single job. To actually restore them, you'd run the same cmdlet again without the `-WhatIf` switch.         
-
-

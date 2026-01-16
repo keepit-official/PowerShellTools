@@ -509,6 +509,80 @@ function Resolve-KeepitConnectorIdentity {
     }
 }
 
+<#
+.SYNOPSIS
+    Converts an ISO 8601 duration to human-readable English text
+.DESCRIPTION
+    Parses ISO 8601 duration format (e.g., P3M, P1Y, P1Y6M, P30D) and converts
+    to readable English text (e.g., "3 months", "1 year", "1 year, 6 months", "30 days").
+    Returns "Unlimited" for null/empty input.
+.PARAMETER Duration
+    ISO 8601 duration string (e.g., "P3M", "P1Y6M", "P30D")
+.OUTPUTS
+    String - Human-readable duration text
+.EXAMPLE
+    ConvertFrom-ISO8601Duration -Duration "P3M"
+    # Returns: "3 months"
+.EXAMPLE
+    ConvertFrom-ISO8601Duration -Duration "P1Y6M"
+    # Returns: "1 year, 6 months"
+.EXAMPLE
+    ConvertFrom-ISO8601Duration -Duration $null
+    # Returns: "Unlimited"
+#>
+function ConvertFrom-ISO8601Duration {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$Duration
+    )
+
+    # Handle null/empty as unlimited retention
+    if ([string]::IsNullOrWhiteSpace($Duration)) {
+        return "Unlimited"
+    }
+
+    # ISO 8601 duration format: P[n]Y[n]M[n]D or P[n]W
+    # Examples: P3M (3 months), P1Y (1 year), P1Y6M (1 year 6 months), P30D (30 days), P2W (2 weeks)
+    if ($Duration -notmatch '^P') {
+        Write-Verbose "Invalid ISO 8601 duration format: $Duration"
+        return $Duration  # Return as-is if not valid ISO 8601
+    }
+
+    $parts = @()
+
+    # Extract years
+    if ($Duration -match '(\d+)Y') {
+        $years = [int]$Matches[1]
+        $parts += if ($years -eq 1) { "1 year" } else { "$years years" }
+    }
+
+    # Extract months
+    if ($Duration -match '(\d+)M(?![A-Z])') {
+        $months = [int]$Matches[1]
+        $parts += if ($months -eq 1) { "1 month" } else { "$months months" }
+    }
+
+    # Extract weeks
+    if ($Duration -match '(\d+)W') {
+        $weeks = [int]$Matches[1]
+        $parts += if ($weeks -eq 1) { "1 week" } else { "$weeks weeks" }
+    }
+
+    # Extract days
+    if ($Duration -match '(\d+)D') {
+        $days = [int]$Matches[1]
+        $parts += if ($days -eq 1) { "1 day" } else { "$days days" }
+    }
+
+    if ($parts.Count -eq 0) {
+        Write-Verbose "Could not parse ISO 8601 duration: $Duration"
+        return $Duration  # Return as-is if nothing was parsed
+    }
+
+    return $parts -join ', '
+}
+
 #endregion
 
 #region Public Cmdlets
@@ -839,7 +913,7 @@ function Get-KeepitConnector {
                 Type             = $deviceType
                 TypeDisplayName  = Get-ConnectorTypeDisplayName -ConnectorType $deviceType
                 Created          = $device.created
-                BackupRetention  = $device.'backup-retention'
+                BackupRetention  = ConvertFrom-ISO8601Duration -Duration $device.'backup-retention'
                 RetentionUpdated = $device.'backup-retention-updated'
                 OrgLink          = $device.orglink
             }
@@ -867,14 +941,14 @@ function Get-KeepitConnector {
     Can be piped from Get-KeepitConnector.
 .PARAMETER Latest
     Switch to retrieve only the most recent snapshot
-.PARAMETER StartDate
+.PARAMETER StartTime
     Start date / time for the snapshot range query (inclusive)
-.PARAMETER EndDate
+.PARAMETER EndTime
     End date / time for the snapshot range query (inclusive)
 .PARAMETER CountOnly
     Switch to return only the count of snapshots in the specified range
 .PARAMETER Reverse
-    Search backwards from StartDate instead of forwards. Useful for finding the most recent snapshot
+    Search backwards from StartTime instead of forwards. Useful for finding the most recent snapshot
     at or before a specific timestamp. Use with -ResultSize 1 to get just the closest snapshot.
 .PARAMETER ResultSize
     Maximum number of snapshots to return. Default is 99.
@@ -893,15 +967,15 @@ function Get-KeepitConnector {
 
     Gets the most recent snapshot for all connectors
 .EXAMPLE
-    Get-KeepitSnapshot -Connector "abc123" -StartDate (Get-Date).AddDays(-30) -EndDate (Get-Date)
+    Get-KeepitSnapshot -Connector "abc123" -StartTime (Get-Date).AddDays(-30) -EndTime (Get-Date)
 
     Gets all snapshots from the last 30 days
 .EXAMPLE
-    Get-KeepitSnapshot -Connector "abc123" -StartDate "2024-01-01" -EndDate "2024-12-31" -CountOnly
+    Get-KeepitSnapshot -Connector "abc123" -StartTime "2024-01-01" -EndTime "2024-12-31" -CountOnly
 
     Returns the count of snapshots for the year 2024
 .EXAMPLE
-    Get-KeepitSnapshot -Connector "abc123" -StartDate "2025-12-28T03:16:10Z" -EndDate (Get-Date).AddYears(-1) -Reverse -ResultSize 1
+    Get-KeepitSnapshot -Connector "abc123" -StartTime "2025-12-28T03:16:10Z" -EndTime (Get-Date).AddYears(-1) -Reverse -ResultSize 1
 
     Gets the most recent snapshot at or before the specified timestamp by searching backwards up to 1 year
 .OUTPUTS
@@ -932,11 +1006,11 @@ function Get-KeepitSnapshot {
 
         [Parameter(Mandatory = $true, ParameterSetName = 'Range')]
         [Parameter(Mandatory = $true, ParameterSetName = 'Count')]
-        [DateTime]$StartDate,
+        [DateTime]$StartTime,
 
         [Parameter(Mandatory = $true, ParameterSetName = 'Range')]
         [Parameter(Mandatory = $true, ParameterSetName = 'Count')]
-        [DateTime]$EndDate,
+        [DateTime]$EndTime,
 
         [Parameter(Mandatory = $true, ParameterSetName = 'Count')]
         [switch]$CountOnly,
@@ -962,17 +1036,17 @@ function Get-KeepitSnapshot {
         if ($PSCmdlet.ParameterSetName -in @('Range', 'Count')) {
             $today = [DateTime]::Today
 
-            if ($StartDate.Date -gt $today) {
-                throw "StartDate cannot be in the future. StartDate: $($StartDate.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), Today: $($today.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
+            if ($StartTime.Date -gt $today) {
+                throw "StartTime cannot be in the future. StartTime: $($StartTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), Today: $($today.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
             }
 
-            if ($EndDate.Date -gt $today) {
-                throw "EndDate cannot be in the future. EndDate: $($EndDate.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), Today: $($today.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
+            if ($EndTime.Date -gt $today) {
+                throw "EndTime cannot be in the future. EndTime: $($EndTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), Today: $($today.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
             }
 
-            # When Reverse is specified, StartDate should be later than EndDate (we search backwards)
-            if (-not $Reverse -and $StartDate -gt $EndDate) {
-                throw "StartDate cannot be later than EndDate. StartDate: $($StartDate.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), EndDate: $($EndDate.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
+            # When Reverse is specified, StartTime should be later than EndTime (we search backwards)
+            if (-not $Reverse -and $StartTime -gt $EndTime) {
+                throw "StartTime cannot be later than EndTime. StartTime: $($StartTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), EndTime: $($EndTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
             }
         }
 
@@ -1056,7 +1130,7 @@ function Get-KeepitSnapshot {
                     $targetSize = if ($isUnlimited) { [int]::MaxValue } else { [int]$ResultSize }
 
                     $allSnapshots = [System.Collections.ArrayList]::new()
-                    $currentStartDate = $StartDate
+                    $currentStartDate = $StartTime
                     $iteration = 0
                     $maxIterations = if ($isUnlimited) { 10000 } else { [Math]::Ceiling($targetSize / 99) + 1 }
 
@@ -1067,8 +1141,8 @@ function Get-KeepitSnapshot {
 
                         $startTimestamp = ConvertTo-KeepitTimestamp -DateTime $currentStartDate
                         # API expects span as ISO8601 duration (e.g., P1D for 1 day)
-                        # Add 1 day to make EndDate inclusive (P1D from Dec 30 only covers Dec 30)
-                        $spanDays = [Math]::Ceiling(($EndDate - $currentStartDate).TotalDays) + 1
+                        # Add 1 day to make EndTime inclusive (P1D from Dec 30 only covers Dec 30)
+                        $spanDays = [Math]::Ceiling(($EndTime - $currentStartDate).TotalDays) + 1
                         if ($spanDays -lt 1) { $spanDays = 1 }
                         $spanISO8601 = "P${spanDays}D"
 
@@ -1141,9 +1215,9 @@ function Get-KeepitSnapshot {
                             $currentStartDate = $parsedDate.AddSeconds(1)
                             Write-Verbose "Next page starts at: $(ConvertTo-KeepitTimestamp -DateTime $currentStartDate)"
 
-                            # Stop if we've walked past the end date
-                            if ($currentStartDate -gt $EndDate) {
-                                Write-Verbose "Reached end date, stopping pagination"
+                            # Stop if we've walked past the end time
+                            if ($currentStartDate -gt $EndTime) {
+                                Write-Verbose "Reached end time, stopping pagination"
                                 break
                             }
                         }
@@ -1177,9 +1251,9 @@ function Get-KeepitSnapshot {
                         # Simple case: single API call to count endpoint
                         $uri = "$baseUrl/users/$userId/devices/$connectorGuid/history/count"
 
-                        $startTimestamp = ConvertTo-KeepitTimestamp -DateTime $StartDate
-                        # Add 1 day to make EndDate inclusive (P1D from Dec 30 only covers Dec 30)
-                        $spanDays = [Math]::Ceiling(($EndDate - $StartDate).TotalDays) + 1
+                        $startTimestamp = ConvertTo-KeepitTimestamp -DateTime $StartTime
+                        # Add 1 day to make EndTime inclusive (P1D from Dec 30 only covers Dec 30)
+                        $spanDays = [Math]::Ceiling(($EndTime - $StartTime).TotalDays) + 1
                         if ($spanDays -lt 1) { $spanDays = 1 }
                         $spanISO8601 = "P${spanDays}D"
 
@@ -1202,8 +1276,8 @@ function Get-KeepitSnapshot {
                         [PSCustomObject]@{
                             ConnectorGuid = $connectorGuid
                             ConnectorName = $resolved.Name
-                            StartDate = $StartDate
-                            EndDate = $EndDate
+                            StartTime = $StartTime
+                            EndTime = $EndTime
                             Count = $count
                         }
                     }
@@ -1211,7 +1285,7 @@ function Get-KeepitSnapshot {
                         # Pagination required: use range endpoint to count
                         $uri = "$baseUrl/users/$userId/devices/$connectorGuid/history/range"
                         $totalCount = 0
-                        $currentStartDate = $StartDate
+                        $currentStartDate = $StartTime
                         $iteration = 0
                         $maxIterations = if ($isUnlimited) { 10000 } else { [Math]::Ceiling($targetSize / 99) + 1 }
 
@@ -1221,8 +1295,8 @@ function Get-KeepitSnapshot {
                             Write-Verbose "Count query iteration $iteration (counted: $totalCount, target: $targetDisplay)"
 
                             $startTimestamp = ConvertTo-KeepitTimestamp -DateTime $currentStartDate
-                            # Add 1 day to make EndDate inclusive (P1D from Dec 30 only covers Dec 30)
-                            $spanDays = [Math]::Ceiling(($EndDate - $currentStartDate).TotalDays) + 1
+                            # Add 1 day to make EndTime inclusive (P1D from Dec 30 only covers Dec 30)
+                            $spanDays = [Math]::Ceiling(($EndTime - $currentStartDate).TotalDays) + 1
                             if ($spanDays -lt 1) { $spanDays = 1 }
                             $spanISO8601 = "P${spanDays}D"
 
@@ -1278,8 +1352,8 @@ function Get-KeepitSnapshot {
                                 $currentStartDate = $parsedDate.AddSeconds(1)
                                 Write-Verbose "Next page starts at: $(ConvertTo-KeepitTimestamp -DateTime $currentStartDate)"
 
-                                if ($currentStartDate -gt $EndDate) {
-                                    Write-Verbose "Reached end date, stopping pagination"
+                                if ($currentStartDate -gt $EndTime) {
+                                    Write-Verbose "Reached end time, stopping pagination"
                                     break
                                 }
                             }
@@ -1295,8 +1369,8 @@ function Get-KeepitSnapshot {
                         [PSCustomObject]@{
                             ConnectorGuid = $connectorGuid
                             ConnectorName = $resolved.Name
-                            StartDate = $StartDate
-                            EndDate = $EndDate
+                            StartTime = $StartTime
+                            EndTime = $EndTime
                             Count = $totalCount
                         }
                     }
@@ -1324,18 +1398,18 @@ function Get-KeepitSnapshot {
 .PARAMETER Type
     Optional job type filter. Valid values: 'backup', 'restore'.
     If not specified, returns all job types.
-.PARAMETER StartDate
-    Optional start date for filtering jobs. If specified, EndDate must also be provided.
-    When StartDate and EndDate are provided, the default future-only filter is disabled
+.PARAMETER StartTime
+    Optional start date for filtering jobs. If specified, EndTime must also be provided.
+    When StartTime and EndTime are provided, the default future-only filter is disabled
     and all jobs within the date range are returned.
     Jobs are filtered based on their Start time (or Scheduled time if Start is not available).
-    Only jobs with dates on or after StartDate are included.
-.PARAMETER EndDate
-    Optional end date for filtering jobs. If specified, StartDate must also be provided.
-    When StartDate and EndDate are provided, the default future-only filter is disabled
+    Only jobs with dates on or after StartTime are included.
+.PARAMETER EndTime
+    Optional end date for filtering jobs. If specified, StartTime must also be provided.
+    When StartTime and EndTime are provided, the default future-only filter is disabled
     and all jobs within the date range are returned.
     Jobs are filtered based on their Start time (or Scheduled time if Start is not available).
-    Only jobs with dates on or before EndDate are included.
+    Only jobs with dates on or before EndTime are included.
 .EXAMPLE
     Get-KeepitJobs -Connector "Production M365"
 
@@ -1345,15 +1419,15 @@ function Get-KeepitSnapshot {
 
     Gets only active and future backup jobs for the connector
 .EXAMPLE
-    Get-KeepitJobs -Connector "abc123" -StartDate (Get-Date).AddDays(-7) -EndDate (Get-Date)
+    Get-KeepitJobs -Connector "abc123" -StartTime (Get-Date).AddDays(-7) -EndTime (Get-Date)
 
     Gets all jobs from the last 7 days
 .EXAMPLE
-    Get-KeepitJobs -Connector "abc123" -Type restore -StartDate "2025-12-01" -EndDate "2025-12-21"
+    Get-KeepitJobs -Connector "abc123" -Type restore -StartTime "2025-12-01" -EndTime "2025-12-21"
 
     Gets only restore jobs between December 1 and December 21, 2025
 .EXAMPLE
-    Get-KeepitJobs -Connector "abc123" -StartDate "2025-12-15" -EndDate "2025-12-15"
+    Get-KeepitJobs -Connector "abc123" -StartTime "2025-12-15" -EndTime "2025-12-15"
 
     Gets all jobs for a single day (December 15, 2025). The range is automatically expanded to cover 00:00:00 to 23:59:59.
 .EXAMPLE
@@ -1382,11 +1456,11 @@ function Get-KeepitSnapshot {
     - Active jobs are always included regardless of when they started
     - Future jobs are included if Start or Scheduled time is greater than current time
     - Completed jobs from the past are excluded
-    To see all jobs including completed past jobs, specify a date range using StartDate and EndDate.
+    To see all jobs including completed past jobs, specify a date range using StartTime and EndTime.
     Date filtering uses Start time if available, falls back to Scheduled time.
     Jobs without Start or Scheduled times are excluded by the default filter.
-    StartDate and EndDate must be provided together - one cannot be specified without the other.
-    If StartDate and EndDate are the same day, the range is expanded to cover the full day (00:00:00 to 23:59:59).
+    StartTime and EndTime must be provided together - one cannot be specified without the other.
+    If StartTime and EndTime are the same day, the range is expanded to cover the full day (00:00:00 to 23:59:59).
 #>
 function Get-KeepitJobs {
     [CmdletBinding()]
@@ -1401,39 +1475,39 @@ function Get-KeepitJobs {
         [string]$Type,
 
         [Parameter(Mandatory = $false)]
-        [DateTime]$StartDate,
+        [DateTime]$StartTime,
 
         [Parameter(Mandatory = $false)]
-        [DateTime]$EndDate
+        [DateTime]$EndTime
     )
 
     begin {
         Write-Verbose "Get-KeepitJobs"
 
         # Validate date parameters
-        $hasStartDate = $PSBoundParameters.ContainsKey('StartDate')
-        $hasEndDate = $PSBoundParameters.ContainsKey('EndDate')
+        $hasStartTime = $PSBoundParameters.ContainsKey('StartTime')
+        $hasEndTime = $PSBoundParameters.ContainsKey('EndTime')
 
-        if ($hasStartDate -and -not $hasEndDate) {
-            throw "StartDate specified without EndDate. Both StartDate and EndDate must be provided together."
+        if ($hasStartTime -and -not $hasEndTime) {
+            throw "StartTime specified without EndTime. Both StartTime and EndTime must be provided together."
         }
 
-        if ($hasEndDate -and -not $hasStartDate) {
-            throw "EndDate specified without StartDate. Both StartDate and EndDate must be provided together."
+        if ($hasEndTime -and -not $hasStartTime) {
+            throw "EndTime specified without StartTime. Both StartTime and EndTime must be provided together."
         }
 
-        if ($hasStartDate -and $hasEndDate) {
+        if ($hasStartTime -and $hasEndTime) {
             # Handle same-day search - expand to full day
-            if ($StartDate.Date -eq $EndDate.Date) {
-                Write-Verbose "StartDate and EndDate are the same date - expanding to full day"
-                $StartDate = $StartDate.Date  # Midnight start
-                $EndDate = $EndDate.Date.AddDays(1).AddSeconds(-1)  # 23:59:59
-                Write-Verbose "Expanded range: $($StartDate.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)) to $($EndDate.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture))"
+            if ($StartTime.Date -eq $EndTime.Date) {
+                Write-Verbose "StartTime and EndTime are the same date - expanding to full day"
+                $StartTime = $StartTime.Date  # Midnight start
+                $EndTime = $EndTime.Date.AddDays(1).AddSeconds(-1)  # 23:59:59
+                Write-Verbose "Expanded range: $($StartTime.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)) to $($EndTime.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture))"
             }
-            elseif ($StartDate -ge $EndDate) {
-                throw "StartDate must be less than EndDate. StartDate: $StartDate, EndDate: $EndDate"
+            elseif ($StartTime -ge $EndTime) {
+                throw "StartTime must be less than EndTime. StartTime: $StartTime, EndTime: $EndTime"
             }
-            Write-Verbose "Date range filter: $StartDate to $EndDate"
+            Write-Verbose "Date range filter: $StartTime to $EndTime"
             $useFutureFilter = $false
         }
         else {
@@ -1471,8 +1545,8 @@ function Get-KeepitJobs {
             else {
                 Write-Verbose "Job Type Filter: None (all types)"
             }
-            if ($hasStartDate -and $hasEndDate) {
-                Write-Verbose "Date Range Filter: $StartDate to $EndDate"
+            if ($hasStartTime -and $hasEndTime) {
+                Write-Verbose "Date Range Filter: $StartTime to $EndTime"
             }
 
             # Build request
@@ -1556,7 +1630,7 @@ function Get-KeepitJobs {
                     }
                 }
                 # Apply date range filter if specified
-                elseif ($hasStartDate -and $hasEndDate) {
+                elseif ($hasStartTime -and $hasEndTime) {
                     # Use Start time if available, fall back to Scheduled time
                     $jobDateTime = $null
                     if ($job.start) {
@@ -1567,8 +1641,8 @@ function Get-KeepitJobs {
                     }
 
                     if ($jobDateTime) {
-                        if ($jobDateTime -lt $StartDate -or $jobDateTime -gt $EndDate) {
-                            Write-Verbose "Skipping job $($job.guid) - date '$jobDateTime' is outside range $StartDate to $EndDate"
+                        if ($jobDateTime -lt $StartTime -or $jobDateTime -gt $EndTime) {
+                            Write-Verbose "Skipping job $($job.guid) - date '$jobDateTime' is outside range $StartTime to $EndTime"
                             continue
                         }
                     }
@@ -2279,10 +2353,10 @@ function New-RestoreJobXml {
 .PARAMETER RestorePath
     The folder path to restore items to. Currently not implemented - items are restored
     in-place to their original location. A warning will be displayed if this parameter is used.
-.PARAMETER StartDate
+.PARAMETER StartTime
     The start of the date range for searching deleted items.
-.PARAMETER EndDate
-    The end of the date range for searching deleted items. Must be after StartDate. If you specify StartDate and EndDate as equal, the restore will include items from midnight on the start date until midnight on the following day.
+.PARAMETER EndTime
+    The end of the date range for searching deleted items. Must be after StartTime. If you specify StartTime and EndTime as equal, the restore will include items from midnight on the start date until midnight on the following day.
 .PARAMETER Type
     The type of items to restore. Valid values: email, user, OneDrive.
     Default is "email".
@@ -2293,15 +2367,15 @@ function New-RestoreJobXml {
     When specified, prints the XML job configuration blob for each restore job.
     Works with both -WhatIf (to see what would be submitted) and normal execution (to see what was submitted).
 .EXAMPLE
-    Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "Production M365" -RootPath "Inbox" -StartDate "2026-01-01" -EndDate "2026-01-15"
+    Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "Production M365" -RootPath "Inbox" -StartTime "2026-01-01" -EndTime "2026-01-15"
 
     Restores all deleted items from the user's Inbox for the period 1-15 January 2026
 .EXAMPLE
-    Import-Csv users.csv | Restore-KeepitBulkDeletedItems -Connector "abc123-def456" -RootPath "Inbox" -StartDate "2026-01-01" -EndDate "2026-01-15"
+    Import-Csv users.csv | Restore-KeepitBulkDeletedItems -Connector "abc123-def456" -RootPath "Inbox" -StartTime "2026-01-01" -EndTime "2026-01-15"
 
     Restores deleted items for multiple users from a CSV file with UserPrincipalName, UPN, or Email column
 .EXAMPLE
-    Restore-KeepitBulkDeletedItems -UPN "user@example.com" -Connector "Production M365" -RootPath "Deleted Items" -StartDate (Get-Date).AddDays(-30) -EndDate (Get-Date) -WhatIf
+    Restore-KeepitBulkDeletedItems -UPN "user@example.com" -Connector "Production M365" -RootPath "Deleted Items" -StartTime (Get-Date).AddDays(-30) -EndTime (Get-Date) -WhatIf
 
     Shows what would be restored from the Deleted Items folder for the last 30 days without actually restoring
 .OUTPUTS
@@ -2344,10 +2418,10 @@ function Restore-KeepitBulkDeletedItems {
         [string]$RestorePath,
 
         [Parameter(Mandatory = $true)]
-        [DateTime]$StartDate,
+        [DateTime]$StartTime,
 
         [Parameter(Mandatory = $true)]
-        [DateTime]$EndDate,
+        [DateTime]$EndTime,
 
         [Parameter(Mandatory = $false)]
         [ValidateSet('email', 'user', 'OneDrive')]
@@ -2364,16 +2438,16 @@ function Restore-KeepitBulkDeletedItems {
         Write-Verbose "=== Restore-KeepitBulkDeletedItems: Initialization ==="
 
         # Validate date range (allow same-day for whole-day searches)
-        if ($EndDate -lt $StartDate) {
-            throw "EndDate cannot be before StartDate. StartDate: $($StartDate.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), EndDate: $($EndDate.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
+        if ($EndTime -lt $StartTime) {
+            throw "EndTime cannot be before StartTime. StartTime: $($StartTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), EndTime: $($EndTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
         }
 
         # Handle same-day search - expand to full day
-        if ($StartDate.Date -eq $EndDate.Date) {
-            Write-Verbose "StartDate and EndDate are the same date - expanding to full day"
-            $StartDate = $StartDate.Date  # Midnight start
-            $EndDate = $EndDate.Date.AddDays(1).AddSeconds(-1)  # 23:59:59
-            Write-Verbose "Expanded range: $($StartDate.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)) to $($EndDate.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture))"
+        if ($StartTime.Date -eq $EndTime.Date) {
+            Write-Verbose "StartTime and EndTime are the same date - expanding to full day"
+            $StartTime = $StartTime.Date  # Midnight start
+            $EndTime = $EndTime.Date.AddDays(1).AddSeconds(-1)  # 23:59:59
+            Write-Verbose "Expanded range: $($StartTime.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)) to $($EndTime.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture))"
         }
 
         # Warn about RestorePath not being implemented
@@ -2408,8 +2482,8 @@ function Restore-KeepitBulkDeletedItems {
             Write-Verbose "UserPrincipalName: $UserPrincipalName"
             Write-Verbose "Connector: $($resolved.Name) ($connectorGuid)"
             Write-Verbose "RootPath: $RootPath"
-            Write-Verbose "StartDate: $StartDate"
-            Write-Verbose "EndDate: $EndDate"
+            Write-Verbose "StartTime: $StartTime"
+            Write-Verbose "EndTime: $EndTime"
             Write-Verbose "Type: $Type"
 
             # Step 1: Convert UserPrincipalName to GUID if needed (for email type only)
@@ -2452,8 +2526,8 @@ function Restore-KeepitBulkDeletedItems {
                 RootPath    = $pathRoot
                 DeletedOnly = $true
                 ResultSize  = 'Unlimited'
-                StartTime   = $StartDate
-                EndTime     = $EndDate
+                StartTime   = $StartTime
+                EndTime     = $EndTime
             }
             if ($Type -eq 'user') {
                 $searchParams.Recursive = $false
@@ -2555,8 +2629,8 @@ function Restore-KeepitBulkDeletedItems {
                         # Search backwards from item timestamp to find the snapshot at or before this time
                         $snapshotParams = @{
                             Connector   = $connectorGuid
-                            StartDate   = $snapshotTime
-                            EndDate     = $snapshotTime.AddYears(-1)
+                            StartTime   = $snapshotTime
+                            EndTime     = $snapshotTime.AddYears(-1)
                             Reverse     = $true
                             ResultSize  = 1
                         }
@@ -2601,8 +2675,8 @@ function Restore-KeepitBulkDeletedItems {
 
                 $snapshotParams = @{
                     Connector   = $connectorGuid
-                    StartDate   = $snapshotTime
-                    EndDate     = $snapshotTime.AddYears(-1)
+                    StartTime   = $snapshotTime
+                    EndTime     = $snapshotTime.AddYears(-1)
                     Reverse     = $true
                     ResultSize  = 1
                 }
@@ -2625,9 +2699,15 @@ function Restore-KeepitBulkDeletedItems {
 
                 # Show XML blob if ShowJobs is specified
                 if ($ShowJobs) {
-                    Write-Host "Job XML for snapshot $timestamp :"
-                    # Use Out-Host to ensure complete XML is shown without truncation
-                    $xmlConfig | Out-Host
+                    Write-Host "`nJob XML for snapshot ${timestamp}:" -ForegroundColor Cyan
+                    Write-Host $xmlConfig -ForegroundColor Yellow
+                    Write-Host ""
+                }
+
+                # Show XML configuration with -WhatIf
+                if ($WhatIfPreference) {
+                    Write-Host "`nRestore job XML that would be submitted:" -ForegroundColor Cyan
+                    Write-Host $xmlConfig -ForegroundColor Yellow
                     Write-Host ""
                 }
 
@@ -4228,6 +4308,9 @@ function Get-KeepitConnectorConfiguration {
     or backup_config for Azure AD and Power BI connectors.
 
     Supports pipeline input from Get-KeepitConnector for the connector identity.
+
+    You can either provide a complete -RawConfiguration JSON string, or use modification parameters
+    to incrementally change specific settings (e.g., adding/removing sites or groups).
 .PARAMETER Connector
     The connector name or GUID. Can be piped from Get-KeepitConnector.
     Aliases: ConnectorGuid, Name
@@ -4237,30 +4320,67 @@ function Get-KeepitConnectorConfiguration {
     If not provided, the current configuration will be fetched and modification parameters
     (such as -AutoIncludeSites, -AddIncludedSites, etc.) will be applied to it.
 .PARAMETER Workload
-    The workload to target for modification. For Microsoft 365 connectors, valid values are:
-    Exchange, OneDrive, SharePoint, Teams.
+    The workload to target for modification. Required when using site or group modification parameters.
+    For Microsoft 365 connectors, valid values are: Exchange, OneDrive, SharePoint, Teams.
 .PARAMETER AutoIncludeSites
     Controls the AutoIncludeAllSiteCollections setting for SharePoint configuration.
+    Requires -Workload SharePoint.
     - $true: Enables automatic inclusion of all site collections
     - $false: Disables automatic inclusion (removes the setting if present)
-    When this parameter is used without -RawConfiguration, the current configuration
-    is fetched, modified, and saved back.
+.PARAMETER AddIncludedSites
+    Array of SharePoint site URLs to add to the SiteCollections list.
+    Requires -Workload SharePoint. Sites are added with AutoIncludeAllSubSites = true.
+    Shows a warning if a site is already included.
+.PARAMETER RemoveIncludedSites
+    Array of SharePoint site URLs to remove from the SiteCollections list.
+    Requires -Workload SharePoint. Shows a warning if a site is not found.
+.PARAMETER AddExcludedSites
+    Array of SharePoint site URLs to add to the ExcludedSiteCollections list.
+    Requires -Workload SharePoint. Shows a warning if a site is already excluded.
+.PARAMETER RemoveExcludedSites
+    Array of SharePoint site URLs to remove from the ExcludedSiteCollections list.
+    Requires -Workload SharePoint. Shows a warning if a site is not found.
+.PARAMETER AutoIncludeGroups
+    Controls the AutoIncludeGroups setting for Teams/UnifiedGroups configuration.
+    Requires -Workload Teams (or UnifiedGroups).
+    - $true: Enables automatic inclusion of all groups
+    - $false: Disables automatic inclusion
+.PARAMETER AddIncludedGroups
+    Array of group GUIDs to add to the IncludeGroups list.
+    Requires -Workload Teams (or UnifiedGroups). Shows a warning if a group is already included.
+.PARAMETER RemoveIncludedGroups
+    Array of group GUIDs to remove from the IncludeGroups list.
+    Requires -Workload Teams (or UnifiedGroups). Shows a warning if a group is not found.
+.PARAMETER AddExcludedGroups
+    Array of group GUIDs to add to the ExcludeGroups list.
+    Requires -Workload Teams (or UnifiedGroups). Shows a warning if a group is already excluded.
+.PARAMETER RemoveExcludedGroups
+    Array of group GUIDs to remove from the ExcludeGroups list.
+    Requires -Workload Teams (or UnifiedGroups). Shows a warning if a group is not found.
 .EXAMPLE
     Set-KeepitConnectorConfiguration -Connector "abc123-def456" -RawConfiguration $jsonConfig
 
     Sets the configuration for the specified connector by GUID.
 .EXAMPLE
-    Set-KeepitConnectorConfiguration -Connector "Production M365" -RawConfiguration $jsonConfig
+    Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload SharePoint -AddIncludedSites "https://contoso.sharepoint.com/sites/Marketing"
 
-    Sets the configuration for a connector by name.
+    Adds a SharePoint site to the included sites list.
 .EXAMPLE
-    Set-KeepitConnectorConfiguration -Connector "Production M365" -AutoIncludeSites $true
+    Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload SharePoint -RemoveIncludedSites "https://contoso.sharepoint.com/sites/OldSite"
 
-    Enables automatic inclusion of all SharePoint site collections for the connector.
+    Removes a SharePoint site from the included sites list.
 .EXAMPLE
-    Set-KeepitConnectorConfiguration -Connector "Production M365" -AutoIncludeSites $false
+    Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload Teams -AddExcludedGroups "0aa94c0a-c5e5-417f-8cfa-6744649e25da"
 
-    Disables automatic inclusion of SharePoint site collections.
+    Adds a group to the excluded groups list for Teams backup.
+.EXAMPLE
+    Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload Teams -RemoveExcludedGroups "0aa94c0a-c5e5-417f-8cfa-6744649e25da"
+
+    Removes a group from the excluded groups list for Teams backup.
+.EXAMPLE
+    Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload SharePoint -AddIncludedSites $siteUrls -WhatIf
+
+    Shows what configuration would be written without making changes.
 .EXAMPLE
     # Read, modify, and save configuration
     $current = Get-KeepitConnectorConfiguration -Connector "abc123"
@@ -4270,11 +4390,6 @@ function Get-KeepitConnectorConfiguration {
     Set-KeepitConnectorConfiguration -Connector "abc123" -RawConfiguration $newJson
 
     Reads current configuration, modifies it, and saves it back.
-.EXAMPLE
-    Get-KeepitConnectorConfiguration -Connector "Source M365" |
-        ForEach-Object { Set-KeepitConnectorConfiguration -Connector "Target M365" -RawConfiguration $_.RawConfiguration }
-
-    Copies configuration from one connector to another.
 .OUTPUTS
     PSCustomObject with properties:
         - ConnectorGuid: The connector GUID (lowercase)
@@ -4282,11 +4397,15 @@ function Get-KeepitConnectorConfiguration {
         - Type: The connector type
         - TypeDisplayName: Human-readable connector type
         - Status: "Success" or error message
+        - RawConfiguration: The JSON configuration that was written (on success)
 .NOTES
     Requires an active connection via Connect-KeepitService.
-    Configuration is sent to the API as-is; invalid JSON will cause an error.
-    The API does not validate the configuration structure - ensure the JSON matches
-    the expected format for the connector type.
+
+    When using -WhatIf with SharePoint or Teams workload, the raw configuration that would
+    be written is displayed in cyan/yellow formatting.
+
+    If no actual changes are made (e.g., adding a site that already exists), the cmdlet
+    displays a message and skips the write operation.
 
     API endpoint used:
     - PUT /users/{userId}/devices/{connectorGUID}/attributes/ng_backup_config
@@ -4347,7 +4466,13 @@ function Set-KeepitConnectorConfiguration {
         [string[]]$AddIncludedGroups,
 
         [Parameter(Mandatory = $false)]
-        [string[]]$RemoveIncludedGroups
+        [string[]]$RemoveIncludedGroups,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$AddExcludedGroups,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$RemoveExcludedGroups
     )
 
     begin {
@@ -4430,7 +4555,9 @@ function Set-KeepitConnectorConfiguration {
 
             # Check if group list parameters are specified
             $hasGroupListParams = $PSBoundParameters.ContainsKey('AddIncludedGroups') -or
-                                  $PSBoundParameters.ContainsKey('RemoveIncludedGroups')
+                                  $PSBoundParameters.ContainsKey('RemoveIncludedGroups') -or
+                                  $PSBoundParameters.ContainsKey('AddExcludedGroups') -or
+                                  $PSBoundParameters.ContainsKey('RemoveExcludedGroups')
 
             # Check if any Teams/UnifiedGroups modification parameters are specified
             $hasTeamsParams = $PSBoundParameters.ContainsKey('AutoIncludeGroups') -or $hasGroupListParams
@@ -4438,13 +4565,15 @@ function Set-KeepitConnectorConfiguration {
             # Validate group list parameters require Teams or UnifiedGroups workload
             if ($hasGroupListParams) {
                 if ($Workload -notin @('Teams', 'UnifiedGroups')) {
-                    throw "You can only modify included group lists when setting a Teams configuration"
+                    throw "You can only modify group lists when setting a Teams configuration"
                 }
 
                 # Validate all GUIDs in group list parameters
                 $allGuids = @()
                 if ($AddIncludedGroups) { $allGuids += $AddIncludedGroups }
                 if ($RemoveIncludedGroups) { $allGuids += $RemoveIncludedGroups }
+                if ($AddExcludedGroups) { $allGuids += $AddExcludedGroups }
+                if ($RemoveExcludedGroups) { $allGuids += $RemoveExcludedGroups }
 
                 foreach ($guid in $allGuids) {
                     Test-GroupGuid -Guid $guid
@@ -4497,6 +4626,9 @@ function Set-KeepitConnectorConfiguration {
             if ($hasModificationParams) {
                 Write-Verbose "Applying modification parameters to configuration"
 
+                # Save original config for comparison
+                $originalRawConfig = $effectiveRawConfig
+
                 # Parse configuration as JSON
                 try {
                     $configObj = $effectiveRawConfig | ConvertFrom-Json -AsHashtable
@@ -4508,7 +4640,7 @@ function Set-KeepitConnectorConfiguration {
                 # Check for INFO message when site list params used with AutoIncludeAllSiteCollections
                 if ($hasSiteListParams) {
                     $spConfig = $configObj['SharePointNG']
-                    if ($spConfig -and $spConfig.ContainsKey('AutoIncludeAllSiteCollections')) {
+                    if ($spConfig -and $spConfig['AutoIncludeAllSiteCollections'] -eq $true) {
                         Write-Information "INFO: this configuration has AutoIncludeAllSiteCollections set; this may have unexpected results when manually including or excluding sites." -InformationAction Continue
                     }
                 }
@@ -4542,6 +4674,146 @@ function Set-KeepitConnectorConfiguration {
                         else {
                             Write-Verbose "Removing AutoIncludeAllSiteCollections"
                             $spConfig.Remove('AutoIncludeAllSiteCollections')
+                        }
+                    }
+                }
+
+                # Apply AddIncludedSites modification
+                if ($PSBoundParameters.ContainsKey('AddIncludedSites') -and $AddIncludedSites.Count -gt 0) {
+                    Write-Verbose "Processing AddIncludedSites parameter: $($AddIncludedSites.Count) sites"
+
+                    # Ensure SharePointNG section exists
+                    if (-not $configObj.ContainsKey('SharePointNG')) {
+                        $configObj['SharePointNG'] = @{}
+                    }
+
+                    $spConfig = $configObj['SharePointNG']
+
+                    # Get existing SiteCollections array or create new one
+                    if (-not $spConfig.ContainsKey('SiteCollections')) {
+                        $spConfig['SiteCollections'] = @()
+                    }
+
+                    $existingSites = [System.Collections.ArrayList]@($spConfig['SiteCollections'])
+
+                    foreach ($siteUrl in $AddIncludedSites) {
+                        $normalizedUrl = $siteUrl.Trim().TrimEnd('/').ToLowerInvariant()
+                        $alreadyExists = $existingSites | Where-Object {
+                            $_.SiteUrl.Trim().TrimEnd('/').ToLowerInvariant() -eq $normalizedUrl
+                        }
+                        if (-not $alreadyExists) {
+                            $newSite = @{
+                                SiteUrl = $siteUrl.Trim().TrimEnd('/')
+                                AutoIncludeAllSubSites = $true
+                            }
+                            $null = $existingSites.Add($newSite)
+                            Write-Verbose "Added site: $siteUrl"
+                        }
+                        else {
+                            Write-Warning "Site already included, skipping: $siteUrl"
+                        }
+                    }
+
+                    $spConfig['SiteCollections'] = @($existingSites)
+                }
+
+                # Apply RemoveIncludedSites modification
+                if ($PSBoundParameters.ContainsKey('RemoveIncludedSites') -and $RemoveIncludedSites.Count -gt 0) {
+                    Write-Verbose "Processing RemoveIncludedSites parameter: $($RemoveIncludedSites.Count) sites"
+
+                    $spConfig = $configObj['SharePointNG']
+                    if ($spConfig -and $spConfig.ContainsKey('SiteCollections')) {
+                        $existingSites = [System.Collections.ArrayList]@($spConfig['SiteCollections'])
+
+                        foreach ($siteUrl in $RemoveIncludedSites) {
+                            $normalizedUrl = $siteUrl.Trim().TrimEnd('/').ToLowerInvariant()
+                            $exists = $existingSites | Where-Object {
+                                $_.SiteUrl.Trim().TrimEnd('/').ToLowerInvariant() -eq $normalizedUrl
+                            }
+                            if (-not $exists) {
+                                Write-Warning "Site not found in included sites, skipping: $siteUrl"
+                            }
+                        }
+
+                        $urlsToRemove = $RemoveIncludedSites | ForEach-Object { $_.Trim().TrimEnd('/').ToLowerInvariant() }
+                        $remainingSites = $existingSites | Where-Object {
+                            $_.SiteUrl.Trim().TrimEnd('/').ToLowerInvariant() -notin $urlsToRemove
+                        }
+
+                        $spConfig['SiteCollections'] = @($remainingSites)
+                        Write-Verbose "Removed sites, remaining: $(@($remainingSites).Count)"
+                    }
+                    else {
+                        foreach ($siteUrl in $RemoveIncludedSites) {
+                            Write-Warning "Site not found in included sites, skipping: $siteUrl"
+                        }
+                    }
+                }
+
+                # Apply AddExcludedSites modification
+                if ($PSBoundParameters.ContainsKey('AddExcludedSites') -and $AddExcludedSites.Count -gt 0) {
+                    Write-Verbose "Processing AddExcludedSites parameter: $($AddExcludedSites.Count) sites"
+
+                    # Ensure SharePointNG section exists
+                    if (-not $configObj.ContainsKey('SharePointNG')) {
+                        $configObj['SharePointNG'] = @{}
+                    }
+
+                    $spConfig = $configObj['SharePointNG']
+
+                    # Get existing ExcludedSiteCollections array or create new one
+                    if (-not $spConfig.ContainsKey('ExcludedSiteCollections')) {
+                        $spConfig['ExcludedSiteCollections'] = @()
+                    }
+
+                    $existingSites = [System.Collections.ArrayList]@($spConfig['ExcludedSiteCollections'])
+
+                    foreach ($siteUrl in $AddExcludedSites) {
+                        $normalizedUrl = $siteUrl.Trim().TrimEnd('/').ToLowerInvariant()
+                        $alreadyExists = $existingSites | Where-Object {
+                            $_.Trim().TrimEnd('/').ToLowerInvariant() -eq $normalizedUrl
+                        }
+                        if (-not $alreadyExists) {
+                            $null = $existingSites.Add($siteUrl.Trim().TrimEnd('/'))
+                            Write-Verbose "Added excluded site: $siteUrl"
+                        }
+                        else {
+                            Write-Warning "Site already excluded, skipping: $siteUrl"
+                        }
+                    }
+
+                    $spConfig['ExcludedSiteCollections'] = @($existingSites)
+                }
+
+                # Apply RemoveExcludedSites modification
+                if ($PSBoundParameters.ContainsKey('RemoveExcludedSites') -and $RemoveExcludedSites.Count -gt 0) {
+                    Write-Verbose "Processing RemoveExcludedSites parameter: $($RemoveExcludedSites.Count) sites"
+
+                    $spConfig = $configObj['SharePointNG']
+                    if ($spConfig -and $spConfig.ContainsKey('ExcludedSiteCollections')) {
+                        $existingSites = [System.Collections.ArrayList]@($spConfig['ExcludedSiteCollections'])
+
+                        foreach ($siteUrl in $RemoveExcludedSites) {
+                            $normalizedUrl = $siteUrl.Trim().TrimEnd('/').ToLowerInvariant()
+                            $exists = $existingSites | Where-Object {
+                                $_.Trim().TrimEnd('/').ToLowerInvariant() -eq $normalizedUrl
+                            }
+                            if (-not $exists) {
+                                Write-Warning "Site not found in excluded sites, skipping: $siteUrl"
+                            }
+                        }
+
+                        $urlsToRemove = $RemoveExcludedSites | ForEach-Object { $_.Trim().TrimEnd('/').ToLowerInvariant() }
+                        $remainingSites = $existingSites | Where-Object {
+                            $_.Trim().TrimEnd('/').ToLowerInvariant() -notin $urlsToRemove
+                        }
+
+                        $spConfig['ExcludedSiteCollections'] = @($remainingSites)
+                        Write-Verbose "Removed excluded sites, remaining: $(@($remainingSites).Count)"
+                    }
+                    else {
+                        foreach ($siteUrl in $RemoveExcludedSites) {
+                            Write-Warning "Site not found in excluded sites, skipping: $siteUrl"
                         }
                     }
                 }
@@ -4594,7 +4866,7 @@ function Set-KeepitConnectorConfiguration {
                             Write-Verbose "Added group: $groupGuid"
                         }
                         else {
-                            Write-Verbose "Group already exists, skipping: $groupGuid"
+                            Write-Warning "Group already included, skipping: $groupGuid"
                         }
                     }
 
@@ -4608,8 +4880,16 @@ function Set-KeepitConnectorConfiguration {
                     $ugConfig = $configObj['UnifiedGroups']
                     if ($ugConfig -and $ugConfig.ContainsKey('IncludeGroups')) {
                         $existingGroups = [System.Collections.ArrayList]@($ugConfig['IncludeGroups'])
-                        $guidsToRemove = $RemoveIncludedGroups | ForEach-Object { $_.ToLowerInvariant() }
 
+                        foreach ($groupGuid in $RemoveIncludedGroups) {
+                            $normalizedGuid = $groupGuid.ToLowerInvariant()
+                            $exists = $existingGroups | Where-Object { $_.ToLowerInvariant() -eq $normalizedGuid }
+                            if (-not $exists) {
+                                Write-Warning "Group not found in included groups, skipping: $groupGuid"
+                            }
+                        }
+
+                        $guidsToRemove = $RemoveIncludedGroups | ForEach-Object { $_.ToLowerInvariant() }
                         $remainingGroups = $existingGroups | Where-Object {
                             $_.ToLowerInvariant() -notin $guidsToRemove
                         }
@@ -4618,13 +4898,85 @@ function Set-KeepitConnectorConfiguration {
                         Write-Verbose "Removed groups, remaining: $($remainingGroups.Count)"
                     }
                     else {
-                        Write-Verbose "No IncludeGroups array found, nothing to remove"
+                        foreach ($groupGuid in $RemoveIncludedGroups) {
+                            Write-Warning "Group not found in included groups, skipping: $groupGuid"
+                        }
+                    }
+                }
+
+                # Apply AddExcludedGroups modification
+                if ($PSBoundParameters.ContainsKey('AddExcludedGroups') -and $AddExcludedGroups.Count -gt 0) {
+                    Write-Verbose "Processing AddExcludedGroups parameter: $($AddExcludedGroups.Count) groups"
+
+                    # Ensure UnifiedGroups section exists
+                    if (-not $configObj.ContainsKey('UnifiedGroups')) {
+                        $configObj['UnifiedGroups'] = @{}
+                    }
+
+                    $ugConfig = $configObj['UnifiedGroups']
+
+                    # Get existing ExcludeGroups array or create new one
+                    if (-not $ugConfig.ContainsKey('ExcludeGroups')) {
+                        $ugConfig['ExcludeGroups'] = @()
+                    }
+
+                    $existingGroups = [System.Collections.ArrayList]@($ugConfig['ExcludeGroups'])
+
+                    foreach ($groupGuid in $AddExcludedGroups) {
+                        $normalizedGuid = $groupGuid.ToLowerInvariant()
+                        $alreadyExists = $existingGroups | Where-Object { $_.ToLowerInvariant() -eq $normalizedGuid }
+                        if (-not $alreadyExists) {
+                            $null = $existingGroups.Add($groupGuid)
+                            Write-Verbose "Added excluded group: $groupGuid"
+                        }
+                        else {
+                            Write-Warning "Group already excluded, skipping: $groupGuid"
+                        }
+                    }
+
+                    $ugConfig['ExcludeGroups'] = @($existingGroups)
+                }
+
+                # Apply RemoveExcludedGroups modification
+                if ($PSBoundParameters.ContainsKey('RemoveExcludedGroups') -and $RemoveExcludedGroups.Count -gt 0) {
+                    Write-Verbose "Processing RemoveExcludedGroups parameter: $($RemoveExcludedGroups.Count) groups"
+
+                    $ugConfig = $configObj['UnifiedGroups']
+                    if ($ugConfig -and $ugConfig.ContainsKey('ExcludeGroups')) {
+                        $existingGroups = [System.Collections.ArrayList]@($ugConfig['ExcludeGroups'])
+
+                        foreach ($groupGuid in $RemoveExcludedGroups) {
+                            $normalizedGuid = $groupGuid.ToLowerInvariant()
+                            $exists = $existingGroups | Where-Object { $_.ToLowerInvariant() -eq $normalizedGuid }
+                            if (-not $exists) {
+                                Write-Warning "Group not found in excluded groups, skipping: $groupGuid"
+                            }
+                        }
+
+                        $guidsToRemove = $RemoveExcludedGroups | ForEach-Object { $_.ToLowerInvariant() }
+                        $remainingGroups = $existingGroups | Where-Object {
+                            $_.ToLowerInvariant() -notin $guidsToRemove
+                        }
+
+                        $ugConfig['ExcludeGroups'] = @($remainingGroups)
+                        Write-Verbose "Removed excluded groups, remaining: $($remainingGroups.Count)"
+                    }
+                    else {
+                        foreach ($groupGuid in $RemoveExcludedGroups) {
+                            Write-Warning "Group not found in excluded groups, skipping: $groupGuid"
+                        }
                     }
                 }
 
                 # Convert back to JSON
                 $effectiveRawConfig = $configObj | ConvertTo-Json -Depth 10 -Compress
                 Write-Verbose "Modified configuration: $($effectiveRawConfig.Length) characters"
+
+                # Check if configuration actually changed
+                if ($effectiveRawConfig -eq $originalRawConfig) {
+                    Write-Host "No configuration changes requested; original configuration will remain untouched." -ForegroundColor Yellow
+                    return
+                }
             }
 
             # Build request URI
@@ -4644,6 +4996,21 @@ function Set-KeepitConnectorConfiguration {
 
             # ShouldProcess check
             $displayName = Get-ConnectorTypeDisplayName -ConnectorType $connectorType
+
+            # For SharePoint workload with -WhatIf, show the raw configuration that would be written
+            if ($WhatIfPreference -and $Workload -eq 'SharePoint') {
+                Write-Host "`nSharePoint configuration that would be written:" -ForegroundColor Cyan
+                Write-Host $effectiveRawConfig -ForegroundColor Yellow
+                Write-Host ""
+            }
+
+            # For Teams/UnifiedGroups workload with -WhatIf, show the raw configuration that would be written
+            if ($WhatIfPreference -and $Workload -in @('Teams', 'UnifiedGroups')) {
+                Write-Host "`nTeams configuration that would be written:" -ForegroundColor Cyan
+                Write-Host $effectiveRawConfig -ForegroundColor Yellow
+                Write-Host ""
+            }
+
             if ($PSCmdlet.ShouldProcess("$connectorName ($connectorGuid)", "Set $displayName configuration")) {
                 Write-Verbose "Making PUT request to set configuration..."
 
@@ -4653,11 +5020,12 @@ function Set-KeepitConnectorConfiguration {
 
                     # Return success object
                     [PSCustomObject]@{
-                        ConnectorGuid   = $connectorGuid
-                        Name            = $connectorName
-                        Type            = $connectorType
-                        TypeDisplayName = $displayName
-                        Status          = 'Success'
+                        ConnectorGuid    = $connectorGuid
+                        Name             = $connectorName
+                        Type             = $connectorType
+                        TypeDisplayName  = $displayName
+                        Status           = 'Success'
+                        RawConfiguration = $effectiveRawConfig
                     }
                 }
                 catch {
@@ -4933,20 +5301,5 @@ function Disable-KeepitConnector {
 
 #endregion
 
-# Export module members
-Export-ModuleMember -Function @(
-    'Connect-KeepitService',
-    'Disconnect-KeepitService',
-    'Get-KeepitConnector',
-    'Get-KeepitConnectorConfiguration',
-    'Set-KeepitConnectorConfiguration',
-    'Get-KeepitSnapshot',
-    'Get-KeepitJobs',
-    'Start-KeepitBackup',
-    'Submit-KeepitJob',
-    'Restore-KeepitBulkDeletedItems',
-    'Search-KeepitSnapshot',
-    'Convert-KeepitUPNToGuid',
-    'Enable-KeepitConnector',
-    'Disable-KeepitConnector'
-)
+# Note: Function exports are defined in KeepitTools.psd1 (FunctionsToExport)
+# Always import via the manifest (.psd1) to get correct version information
