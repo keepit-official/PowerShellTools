@@ -3,7 +3,7 @@
     RootModule = 'KeepitTools.psm1'
 
     # Version number of this module
-    ModuleVersion = '0.8.0'
+    ModuleVersion = '0.8.1'
 
     # Supported PSEditions
     CompatiblePSEditions = @('Core')
@@ -112,6 +112,10 @@
 
             # ReleaseNotes of this module
             ReleaseNotes = @'
+Version 0.8.1
+- Set-KeepitConnectorConfiguration: Fix -AutoIncludeSites to always set value explicitly
+- Set-KeepitConnectorConfiguration: Fix -AutoIncludeSites:$false to set AutoIncludeAllSiteCollections to false instead of removing the key
+
 Version 0.8.0
 - Set-KeepitConnectorConfiguration: Show raw configuration with -WhatIf for SharePoint and Teams workloads
 - Set-KeepitConnectorConfiguration: Fix missing implementation for -AddIncludedSites, -RemoveIncludedSites, -AddExcludedSites, -RemoveExcludedSites

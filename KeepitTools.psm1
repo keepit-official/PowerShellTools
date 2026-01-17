@@ -4655,27 +4655,10 @@ function Set-KeepitConnectorConfiguration {
                     }
 
                     $spConfig = $configObj['SharePointNG']
-                    $hasAutoInclude = $spConfig.ContainsKey('AutoIncludeAllSiteCollections')
 
-                    if ($AutoIncludeSites -eq $true) {
-                        if ($hasAutoInclude) {
-                            Write-Verbose "AutoIncludeAllSiteCollections already present - no change needed"
-                        }
-                        else {
-                            Write-Verbose "Adding AutoIncludeAllSiteCollections = true"
-                            $spConfig['AutoIncludeAllSiteCollections'] = $true
-                        }
-                    }
-                    else {
-                        # AutoIncludeSites is $false
-                        if (-not $hasAutoInclude) {
-                            Write-Verbose "AutoIncludeAllSiteCollections not present - no change needed"
-                        }
-                        else {
-                            Write-Verbose "Removing AutoIncludeAllSiteCollections"
-                            $spConfig.Remove('AutoIncludeAllSiteCollections')
-                        }
-                    }
+                    # Always set the value explicitly to match the parameter
+                    Write-Verbose "Setting AutoIncludeAllSiteCollections = $AutoIncludeSites"
+                    $spConfig['AutoIncludeAllSiteCollections'] = $AutoIncludeSites
                 }
 
                 # Apply AddIncludedSites modification
