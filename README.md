@@ -116,6 +116,7 @@ Remove-Module KeepitTools
 | `Get-KeepitConnector`              | Retrieves accessible connectors, optionally filtered by type       |
 | `Get-KeepitConnectorConfiguration` | Retrieves connector configuration with optional workload filtering |
 | `Set-KeepitConnectorConfiguration` | Updates connector configuration to add/remove objects or attributes|
+| `New-KeepitConnector`              | Creates a new Keepit connector with specified type and config      |
 | `Get-KeepitSnapshot`               | Retrieves snapshot information (latest, range, or count)           |
 | `Get-KeepitJobs`                   | Retrieves active and future backup/restore jobs for a connector    |
 | `Start-KeepitBackup`               | Starts immediate backup job on a connector                         |
@@ -230,6 +231,9 @@ Get-KeepitConnector -Type 'o365-admin', 'dynamics365'
 
 # Get all Google Workspace connectors
 Get-KeepitConnector -Type 'gsuite'
+
+# Include deleted connectors in results
+Get-KeepitConnector -IncludeDeleted
 ```
 
 ### Get Connector Configuration and Attributes
@@ -257,12 +261,12 @@ Get-KeepitConnectorConfiguration -Connector "Production M365" -Attributes "ng_ba
 
 When working with connector configurations, you will often want to use the `-Workload` parameter to filter / parse the configuration by specific workloads, returning a PSCustomObject. Valid workloads vary by connector type:
 
-| Connector Type             | Valid Workloads                       |
-| -------------------------- | ------------------------------------- |
-| o365-admin (Microsoft 365) | Exchange, OneDrive, SharePoint, Teams |
-| dynamics365                | CRM, PowerApps, PowerAutomate         |
-| azure-ad, powerbi          | Not supported (single config block)   |
-| DSL-based connectors       | Not supported yet                     |
+| Connector Type             | Valid Workloads                                          |
+| -------------------------- | -------------------------------------------------------- |
+| o365-admin (Microsoft 365) | Exchange (ExO), OneDrive (ODB), SharePoint, Teams        |
+| dynamics365                | CRM, PowerApps, PowerAutomate                            |
+| azure-ad, powerbi          | Not supported (single config block)                      |
+| DSL-based connectors       | Not supported yet                                        |
 
 ### Set Connector Configuration
 
@@ -305,6 +309,35 @@ Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload Teams -R
 Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload Teams -AddIncludedGroups "abc123-def456-789012"
 ```
 
+**Exchange configuration:**
+
+Use `-Workload Exchange` (or the alias `ExO`) to manage Exchange Online backup settings.
+
+```powershell
+# Set which Exchange categories to back up
+Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload Exchange -EnabledCategories Mail,Calendar,Contacts
+
+# Same command using the ExO alias
+Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload ExO -EnabledCategories Mail,Calendar,Contacts,Tasks,InPlaceArchive
+```
+
+**Exchange/OneDrive user selection (UserSelectionRules):**
+
+Use these parameters to control which users are included in Exchange or OneDrive backups. Requires `-Workload Exchange` or `-Workload OneDrive` (aliases: `ExO`, `ODB`). All of the group and user arguments accept Entra ID GUIDs, which aren't checked. You can get these
+GUIDs by using Graph PowerShell.
+
+```powershell
+# Add the 'SSOTest' group to the backup configuration
+$groupId = (Get-MgGroup -Filter "DisplayName eq 'SSOTest'").id
+Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload Exchange -AddIncludedGroups $groupId
+
+# Include users not in any specified groups
+Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload Exchange -AddIncludedCategories UsersNotInGroups
+
+# Remove a user from the exclusion list
+Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload Exchange -RemoveExcludedUsers "73e50895-f50f-48a9-b8ec-a09168fa9892"
+```
+
 **Preview changes with -WhatIf:**
 The `-WhatIf` flag will show you what changes would be made to the configuration but doesn't actually write the changes to the Keepit service. It's a good idea
 to use this first to make sure you'll get the expected set of sites/groups in the resulting configuration.
@@ -315,6 +348,32 @@ Set-KeepitConnectorConfiguration -Connector "Production M365" -Workload SharePoi
 ```
 
 The cmdlet shows warnings when adding items that already exist or removing items that don't exist, and skips the write if no actual changes were made.
+
+### Create a New Connector
+
+Use `New-KeepitConnector` to create new Keepit connectors programmatically. The cmdlet supports all connector types including Microsoft 365, Dynamics 365, Google Workspace, and DSL-based connectors (Jira, Confluence, etc.).
+
+**Important:** For Microsoft 365 connectors, you must specify the `-OrgLink` parameter to link the connector to your M365 tenant. You can get the OrgLink value from an existing working connector.
+
+```powershell
+# Get the OrgLink from an existing connector
+$orgLink = (Get-KeepitConnector -Identity "Production M365").OrgLink
+
+# Create a new M365 connector using a configuration file
+New-KeepitConnector -ConnectorType o365-admin -Name "New M365 Backup" -OrgLink $orgLink -TemplateFile "./config/m365-config.json"
+
+# Create a connector with inline JSON configuration
+$config = '{"Exchange":{"EnabledCategories":["Mail","Calendar"]}}'
+New-KeepitConnector -ConnectorType o365-admin -Name "Exchange Only" -OrgLink $orgLink -Configuration $config
+
+# Create a connector with a specific retention period (ISO 8601 duration)
+New-KeepitConnector -ConnectorType o365-admin -Name "Short Retention" -OrgLink $orgLink -TemplateFile "./config.json" -RetentionPeriod "P6M"
+
+# Create a DSL-based connector (e.g., Jira)
+New-KeepitConnector -ConnectorType jira -Name "Jira Backup" -TemplateFile "./jira-config.json"
+```
+
+The cmdlet returns an object with the new connector's GUID, name, type, and retention period. You can pipe this to other cmdlets like `Start-KeepitBackup` to immediately start a backup.
 
 ### Search Backup Data
 
@@ -426,3 +485,4 @@ TotalItems JobCount ItemsBySnapshot
          2        1 {[2026-01-13T16:49:10Z, 2]}
 ```
 The extra "WARNING" message is Search-KeepitSnapshot saying it didn't find anything at the original /OneDrive/ path; this is expected. In this case, the tool found 2 deleted files that were deleted within a single snapshot period, so they could be restored in a single job. To actually restore them, you'd run the same cmdlet again without the `-WhatIf` switch.         
+

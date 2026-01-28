@@ -3,7 +3,7 @@
     RootModule = 'KeepitTools.psm1'
 
     # Version number of this module
-    ModuleVersion = '0.8.1'
+    ModuleVersion = '0.9.5'
 
     # Supported PSEditions
     CompatiblePSEditions = @('Core')
@@ -74,7 +74,8 @@
         'Enable-KeepitConnector',
         'Disable-KeepitConnector',
         'Submit-KeepitJob',
-        'Restore-KeepitBulkDeletedItems'
+        'Restore-KeepitBulkDeletedItems',
+        'New-KeepitConnector'
     )
 
     # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry
@@ -112,7 +113,22 @@
 
             # ReleaseNotes of this module
             ReleaseNotes = @'
-Version 0.8.1
+Version 0.9.5
+- Get-KeepitConnector: Add -All switch to include all connectors in API response
+
+Version 0.9.4
+- Restore-KeepitBulkDeletedItems: Add job batching for large item sets exceeding 64KB XML limit
+- Restore-KeepitBulkDeletedItems: Jobs output now includes BatchNumber and TotalBatches when batching occurs
+- Restore-KeepitBulkDeletedItems: WhatIf output shows accurate job counts including batched jobs
+
+Version 0.9.2
+- New-KeepitConnector: Create new Keepit connectors with configurable type, name, and retention
+- New-KeepitConnector: Support Configuration parameter for inline JSON or TemplateFile for file-based config
+- New-KeepitConnector: Support DSL-based connectors (Jira, Confluence, etc.) with automatic agent-type handling
+- New-KeepitConnector: Implement OrgLink parameter for linking M365 connectors to tenants
+- Get-KeepitConnectorConfiguration: Add -Raw switch to return raw XML from device endpoint
+
+Version 0.8.2
 - Set-KeepitConnectorConfiguration: Fix -AutoIncludeSites to always set value explicitly
 - Set-KeepitConnectorConfiguration: Fix -AutoIncludeSites:$false to set AutoIncludeAllSiteCollections to false instead of removing the key
 

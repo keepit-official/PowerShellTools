@@ -1,10 +1,44 @@
 # KeepitTools Changelog
 
+## Version 0.9.5
+
+- Get-KeepitConnector: Rename -All to -IncludeDeleted for clarity
+- Get-KeepitConnector: Add Deleted property to output (true if connector has deletion-deadline)
+
+## Version 0.9.4
+
+- Restore-KeepitBulkDeletedItems: Add job batching for large item sets exceeding 64KB XML limit
+- Restore-KeepitBulkDeletedItems: Jobs output now includes BatchNumber and TotalBatches when batching occurs
+- Restore-KeepitBulkDeletedItems: WhatIf output shows accurate job counts including batched jobs
+
+## Version 0.9.2
+
+- New-KeepitConnector: Create new Keepit connectors with configurable type, name, and retention
+- New-KeepitConnector: Support Configuration parameter for inline JSON or TemplateFile for file-based config
+- New-KeepitConnector: Support DSL-based connectors (Jira, Confluence, etc.) with automatic agent-type handling
+- New-KeepitConnector: Implement OrgLink parameter for linking M365 connectors to tenants
+- Get-KeepitConnectorConfiguration: Add -Raw switch to return raw XML from device endpoint
+
+## Version 0.8.2
+
+- Set-KeepitConnectorConfiguration: Add Exchange and OneDrive workload support with aliases (ExO, ODB)
+- Set-KeepitConnectorConfiguration: Add -EnabledCategories parameter for Exchange workload
+- Set-KeepitConnectorConfiguration: Add UserSelectionRules parameters for Exchange/OneDrive:
+  - -AddIncludedUsers, -RemoveIncludedUsers (UserSelectionRules.IncludeUsers)
+  - -AddExcludedUsers, -RemoveExcludedUsers (UserSelectionRules.ExcludeUsers)
+  - -AddIncludedCategories, -RemoveIncludedCategories (AllUsers, AllGroups, UsersNotInGroups)
+- Set-KeepitConnectorConfiguration: -AddIncludedGroups/-RemoveIncludedGroups now work for Exchange/OneDrive (modifies UserSelectionRules.IncludeGroups)
+- Set-KeepitConnectorConfiguration: Add case-sensitivity validation for EnabledCategories
+- Set-KeepitConnectorConfiguration: Add -WhatIf support for Exchange and OneDrive workloads
+- Update M365-connector-config-schema.md with expanded UserSelectionRules documentation
+
 ## Version 0.8.1
+
 - Set-KeepitConnectorConfiguration: Fix -AutoIncludeSites to always set value explicitly
 - Set-KeepitConnectorConfiguration: Fix -AutoIncludeSites:$false to set AutoIncludeAllSiteCollections to false instead of removing the key
 
 ## Version 0.8.0
+
 - Set-KeepitConnectorConfiguration: Show raw configuration with -WhatIf for SharePoint and Teams workloads
 - Set-KeepitConnectorConfiguration: Fix missing implementation for -AddIncludedSites, -RemoveIncludedSites, -AddExcludedSites, -RemoveExcludedSites
 - Set-KeepitConnectorConfiguration: Add -AddExcludedGroups and -RemoveExcludedGroups parameters for Teams workload
@@ -15,22 +49,26 @@
 - Restore-KeepitBulkDeletedItems: Show restore job XML with -WhatIf and improved -ShowJobs formatting
 
 ## Version 0.7.8
+
 - Rename StartDate/EndDate to StartTime/EndTime in Get-KeepitSnapshot, Get-KeepitJobs, Restore-KeepitBulkDeletedItems
 - Get-KeepitConnector: BackupRetention now shows human-readable values (e.g., "3 months", "Unlimited") instead of ISO 8601
 - Fix module version display: remove Export-ModuleMember, use manifest FunctionsToExport only
 
 ## Version 0.7.7
+
 - Add Set-KeepitConnectorConfiguration cmdlet for updating connector configuration via JSON
 - Get-KeepitConnectorConfiguration: Add -Workload parameter for filtering by workload type
 - Get-KeepitConnectorConfiguration: Rename Configuration to RawConfiguration for clarity
 - Get-KeepitConnectorConfiguration: Add parsed Configuration property when -Workload specified
 
 ## Version 0.7.6
+
 - Search-KeepitSnapshot: Simplify response parsing, remove 76 lines of dead code
 - Search-KeepitSnapshot: Reduce parsing branches from 14 to 4 (Array, XmlEntry, XmlFeed, Fallback)
 - Search-KeepitSnapshot: Remove unused JSON and regex fallback parsing paths
 
 ## Version 0.7.5
+
 - Restore-KeepitBulkDeletedItems: Add OneDrive for Business file restore support
 - New-RestoreJobXml: Add OneDrive type with DeltaAppend FolderRestoreMode
 - Search-KeepitSnapshot: Add user-not-found validation with clear error message
@@ -40,11 +78,13 @@
 - Search-KeepitSnapshot: Remove Published property from output
 
 ## Version 0.7.1
+
 - Fix culture-sensitive date formatting that caused API failures in non-US locales
 - All DateTime.ToString() calls now use InvariantCulture for consistent ISO 8601 output
 - Add unit tests for ConvertTo-KeepitTimestamp culture-invariant behavior
 
 ## Version 0.7.0
+
 - Restore-KeepitBulkDeletedItems: Add Entra ID user restore support with correct XML configuration
 - Restore-KeepitBulkDeletedItems: Fix CSV pipeline to correctly restore each user (not just first)
 - Restore-KeepitBulkDeletedItems: Handle recreated users by filtering on UPN instead of GUID
@@ -63,26 +103,31 @@
 - Standardize connector parameter naming to Connector across all cmdlets
 
 ## Version 0.5.6
+
 - Search-KeepitSnapshot: Fixed DateTime parsing to treat ISO8601 timestamps as UTC
 - Search-KeepitSnapshot: Renamed SnaptimeFrom/SnaptimeTo to StartTime/EndTime
 - Search-KeepitSnapshot: Same-date StartTime/EndTime now searches entire day
 
 ## Version 0.5.5
+
 - Get-KeepitSnapshot: Fixed date range query to make EndDate inclusive
 
 ## Version 0.5.0
+
 - Submit-KeepitJob: Low-level cmdlet to submit backup/restore jobs with raw XML configuration
 - Restore-KeepitBulkDeletedItems: High-level cmdlet for bulk restore of deleted email items
 - Search-KeepitSnapshot: Added -DeletedOnly parameter, changed -Recursive default to $true
 - Get-KeepitSnapshot: Added ResultSize parameter with pagination support
 
 ## Version 0.0.4
+
 - Get-KeepitConnectorConfiguration: Retrieve connector configuration and custom attributes
 - Enable-KeepitConnector: Enable a disabled connector
 - Disable-KeepitConnector: Disable a connector
 - Get-KeepitConnector: Added display name support for -Type parameter
 
 ## Version 0.0.3 (Initial Release)
+
 - Connect-KeepitService: Establish authenticated connection to Keepit platform
 - Disconnect-KeepitService: Clean up session and cached credentials
 - Get-KeepitConnector: Retrieve all accessible Office 365 connectors
@@ -91,6 +136,7 @@
 - Start-KeepitBackup: Start immediate or scheduled backup jobs on connectors
 
 ### Features
+
 - Cross-platform support (Windows, macOS, Linux)
 - Secure credential handling using PSCredential
 - Support for all Keepit data center environments
