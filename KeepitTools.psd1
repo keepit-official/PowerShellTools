@@ -3,7 +3,7 @@
     RootModule = 'KeepitTools.psm1'
 
     # Version number of this module
-    ModuleVersion = '0.9.5'
+    ModuleVersion = '0.9.7'
 
     # Supported PSEditions
     CompatiblePSEditions = @('Core')
@@ -75,7 +75,8 @@
         'Disable-KeepitConnector',
         'Submit-KeepitJob',
         'Restore-KeepitBulkDeletedItems',
-        'New-KeepitConnector'
+        'New-KeepitConnector',
+        'Get-KeepitAuditLog'
     )
 
     # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry
@@ -113,6 +114,17 @@
 
             # ReleaseNotes of this module
             ReleaseNotes = @'
+Version 0.9.7
+- Get-KeepitJobs: Add -Active switch to show only currently running jobs
+- Get-KeepitJobs: Add -Completed switch to show only finished jobs
+- Get-KeepitJobs: Add -Scheduled switch to show only pending scheduled jobs
+
+Version 0.9.6
+- Get-KeepitAuditLog: New cmdlet to retrieve audit log entries from the Keepit platform
+- Get-KeepitAuditLog: Support date range filtering with -StartTime and -EndTime
+- Get-KeepitAuditLog: Support -ResultSize parameter (default 100, max 10000)
+- Get-KeepitAuditLog: Support -Area filter for event categories
+
 Version 0.9.5
 - Get-KeepitConnector: Add -All switch to include all connectors in API response
 

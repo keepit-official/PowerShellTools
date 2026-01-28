@@ -794,9 +794,9 @@ function Disconnect-KeepitService {
                      dsl, jira, confluence, bamboohr, docusign, jsm, okta, miro, gitlab, monday
     - Display names: 'Microsoft 365', 'Entra ID', 'Jira Service Management', etc.
     If not specified, returns all connector types.
-.PARAMETER IncludeDeleted
-    When specified, includes deleted connectors in the response. Appends '?all=1' to the API request.
-    Deleted connectors have a deletion-deadline set and will have Deleted = $true in the output.
+.PARAMETER All
+    When specified, includes all connectors in the response, including those that may normally
+    be filtered out. Appends '?all=1' to the API request.
 .EXAMPLE
     Get-KeepitConnector
 
@@ -830,9 +830,9 @@ function Disconnect-KeepitService {
 
     Retrieves connectors and filters for production environments
 .EXAMPLE
-    Get-KeepitConnector -IncludeDeleted
+    Get-KeepitConnector -All
 
-    Retrieves all connectors including deleted ones (those with a deletion-deadline set)
+    Retrieves all connectors including those normally filtered out
 .OUTPUTS
     PSCustomObject[] - Array of connector objects with properties:
         - ConnectorGuid: Connector GUID (lowercase)
@@ -846,7 +846,7 @@ function Disconnect-KeepitService {
         - Deleted: Boolean indicating if connector is marked for deletion (has deletion-deadline)
 .NOTES
     Only returns accessible connectors. Use -Type to filter by connector type.
-    Use -IncludeDeleted to include connectors that have been marked for deletion.
+    Use -All to include all connectors, including those normally filtered out.
 #>
 function Get-KeepitConnector {
     [CmdletBinding()]
@@ -861,7 +861,7 @@ function Get-KeepitConnector {
         [string[]]$Type,
 
         [Parameter(Mandatory = $false)]
-        [switch]$IncludeDeleted
+        [switch]$All
     )
 
     try {
@@ -889,9 +889,9 @@ function Get-KeepitConnector {
 
         # Build request
         $uri = "$baseUrl/users/$userId/devices"
-        if ($IncludeDeleted) {
+        if ($All) {
             $uri += '?all=1'
-            Write-Verbose "Including deleted connectors (all=1)"
+            Write-Verbose "Including all connectors (all=1)"
         }
         $headers = @{
             'Authorization' = $authHeader
@@ -1468,6 +1468,15 @@ function Get-KeepitSnapshot {
     and all jobs within the date range are returned.
     Jobs are filtered based on their Start time (or Scheduled time if Start is not available).
     Only jobs with dates on or before EndTime are included.
+.PARAMETER Active
+    Shows only jobs that are currently running (Active = True).
+    Can be combined with -Completed and -Scheduled using OR logic.
+.PARAMETER Completed
+    Shows only jobs that have finished (End time has a value).
+    Can be combined with -Active and -Scheduled using OR logic.
+.PARAMETER Scheduled
+    Shows only pending scheduled jobs (Scheduled has a value, Active = False, and no End value).
+    Can be combined with -Active and -Completed using OR logic.
 .EXAMPLE
     Get-KeepitJobs -Connector "Production M365"
 
@@ -1493,9 +1502,25 @@ function Get-KeepitSnapshot {
 
     Gets all jobs for all connectors
 .EXAMPLE
-    Get-KeepitConnector | Get-KeepitJobs -Type restore | Where-Object { $_.Active -eq $true }
+    Get-KeepitConnector | Get-KeepitJobs -Type restore -Active
 
     Gets all active restore jobs across all connectors
+.EXAMPLE
+    Get-KeepitJobs -Connector "Production M365" -Active
+
+    Gets only currently running jobs for the connector
+.EXAMPLE
+    Get-KeepitJobs -Connector "Production M365" -Completed
+
+    Gets only completed jobs for the connector
+.EXAMPLE
+    Get-KeepitJobs -Connector "Production M365" -Scheduled
+
+    Gets only scheduled (pending) jobs for the connector
+.EXAMPLE
+    Get-KeepitJobs -Connector "Production M365" -Active -Scheduled
+
+    Gets jobs that are either running or scheduled (excludes completed jobs)
 .OUTPUTS
     PSCustomObject containing job details with properties:
         - JobGuid: The job GUID
@@ -1536,11 +1561,26 @@ function Get-KeepitJobs {
         [DateTime]$StartTime,
 
         [Parameter(Mandatory = $false)]
-        [DateTime]$EndTime
+        [DateTime]$EndTime,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Active,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Completed,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Scheduled
     )
 
     begin {
         Write-Verbose "Get-KeepitJobs"
+
+        # Check if any status filters are specified
+        $hasStatusFilter = $Active -or $Completed -or $Scheduled
+        if ($hasStatusFilter) {
+            Write-Verbose "Status filter(s) specified: Active=$Active, Completed=$Completed, Scheduled=$Scheduled"
+        }
 
         # Validate date parameters
         $hasStartTime = $PSBoundParameters.ContainsKey('StartTime')
@@ -1722,6 +1762,34 @@ function Get-KeepitJobs {
                     Scheduled = if ($job.scheduled) { $job.scheduled } else { $null }
                     Start = if ($job.start) { $job.start } else { $null }
                     End = if ($job.end) { $job.end } else { $null }
+                }
+
+                # Apply status filters if specified (OR logic - match any specified filter)
+                if ($hasStatusFilter) {
+                    $matchesFilter = $false
+
+                    # -Active: jobs where Active is True
+                    if ($Active -and $jobObject.Active -eq $true) {
+                        $matchesFilter = $true
+                        Write-Verbose "Job $($jobObject.JobGuid) matches -Active filter"
+                    }
+
+                    # -Completed: jobs where End has a value
+                    if ($Completed -and $null -ne $jobObject.End -and $jobObject.End -ne '') {
+                        $matchesFilter = $true
+                        Write-Verbose "Job $($jobObject.JobGuid) matches -Completed filter"
+                    }
+
+                    # -Scheduled: jobs where Scheduled has a value AND Active is False AND End is empty (pending, not completed)
+                    if ($Scheduled -and ($null -ne $jobObject.Scheduled -and $jobObject.Scheduled -ne '') -and $jobObject.Active -eq $false -and ($null -eq $jobObject.End -or $jobObject.End -eq '')) {
+                        $matchesFilter = $true
+                        Write-Verbose "Job $($jobObject.JobGuid) matches -Scheduled filter"
+                    }
+
+                    if (-not $matchesFilter) {
+                        Write-Verbose "Skipping job $($jobObject.JobGuid) - does not match any status filter"
+                        continue
+                    }
                 }
 
                 Write-Verbose "Outputting job: $($jobObject.JobGuid) (Type: $($jobObject.Type), Active: $($jobObject.Active))"
@@ -3213,13 +3281,13 @@ function Search-KeepitSnapshot {
             # Validate Entra ID (azure-ad) pathroot prefixes
             if ($resolved.Type -eq 'azure-ad' -and $RootPath) {
                 $validEntraIdPaths = @(
-                    'Administrative units',
-                    'App registrations',
+                    'Units',
+                    'Applications',
                     'Devices',
                     'Groups',
                     'Policies',
                     'Roles',
-                    'Service principals',
+                    'ServicePrincipals',
                     'Users'
                 )
 
@@ -6312,6 +6380,189 @@ function New-KeepitConnector {
             throw
         }
         throw "Failed to create connector: $errorMessage"
+    }
+}
+
+<#
+.SYNOPSIS
+    Retrieves audit log entries from the Keepit platform
+.DESCRIPTION
+    Gets audit log records from the Keepit platform with optional filtering by date range.
+    Audit logs contain the history of actions made by Keepit users and are never cleared.
+    Returns human-readable audit log entries with action details, user information, and metadata.
+.PARAMETER StartTime
+    Start of the time window for audit log entries. If not specified along with EndTime,
+    defaults to the last 14 days.
+.PARAMETER EndTime
+    End of the time window for audit log entries. If not specified along with StartTime,
+    defaults to the last 14 days.
+.PARAMETER ResultSize
+    Maximum number of audit log entries to return. Default is 100. Maximum is 10000.
+.PARAMETER Area
+    Filter by audit log area. Valid values: 'User events', 'Backup/Restore', 'Account events', 'Subaccount events'.
+.EXAMPLE
+    Get-KeepitAuditLog
+
+    Retrieves the last 100 audit log entries from the past 14 days
+.EXAMPLE
+    Get-KeepitAuditLog -ResultSize 500
+
+    Retrieves up to 500 audit log entries from the past 14 days
+.EXAMPLE
+    Get-KeepitAuditLog -StartTime (Get-Date).AddDays(-7) -EndTime (Get-Date)
+
+    Retrieves audit log entries from the last 7 days
+.EXAMPLE
+    Get-KeepitAuditLog -Area 'Backup/Restore' -ResultSize 50
+
+    Retrieves the last 50 backup/restore audit log entries
+.OUTPUTS
+    PSCustomObject[] - Array of audit log entry objects with properties:
+        - Time: Timestamp of the action
+        - Account: Account ID
+        - Message: Human-readable description of the action
+        - Area: Category of the action (e.g., 'User events', 'Backup/Restore')
+        - Company: Company name
+        - Acl: ACL name for the action
+        - Method: HTTP method used
+        - Allowed: Whether the action was allowed
+        - Succeeded: Whether the action succeeded (based on HTTP return code)
+        - ClientIP: IP address of the client
+        - Device: Device/connector GUID (if applicable)
+        - Token: Token used for the action (masked for security)
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+    Maximum 10,000 records returned per request. Token values are masked for security.
+#>
+function Get-KeepitAuditLog {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [DateTime]$StartTime,
+
+        [Parameter(Mandatory = $false)]
+        [DateTime]$EndTime,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 10000)]
+        [int]$ResultSize = 100,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('User events', 'Backup/Restore', 'Account events', 'Subaccount events')]
+        [string]$Area
+    )
+
+    try {
+        Write-Verbose "=== Get-KeepitAuditLog ==="
+
+        # Validate date parameters
+        $hasStartTime = $PSBoundParameters.ContainsKey('StartTime')
+        $hasEndTime = $PSBoundParameters.ContainsKey('EndTime')
+
+        if ($hasStartTime -and -not $hasEndTime) {
+            throw "StartTime specified without EndTime. Both StartTime and EndTime must be provided together, or neither."
+        }
+
+        if ($hasEndTime -and -not $hasStartTime) {
+            throw "EndTime specified without StartTime. Both StartTime and EndTime must be provided together, or neither."
+        }
+
+        if ($hasStartTime -and $hasEndTime -and $StartTime -ge $EndTime) {
+            throw "StartTime must be less than EndTime. StartTime: $StartTime, EndTime: $EndTime"
+        }
+
+        # Get authentication header and base URL
+        $authHeader = Get-AuthHeader
+        $baseUrl = Get-KeepitBaseUrl
+        Write-Verbose "Base URL: $baseUrl"
+
+        $userId = $script:KeepitUserId
+        if (-not $userId) {
+            throw "Unable to determine user ID. Ensure you are connected using Connect-KeepitService."
+        }
+        Write-Verbose "User ID: $userId"
+
+        # Build request URI with pagination parameters
+        # Note: API returns 2 fewer records than requested, so add 2 to compensate
+        $apiLimit = [Math]::Min($ResultSize + 2, 10000)
+        $uri = "$baseUrl/audit/filter/pretty?limit=$apiLimit&offset=0"
+        $headers = @{
+            'Authorization' = $authHeader
+            'Content-Type'  = 'application/xml'
+            'Accept'        = 'application/vnd.keepit.v4+xml'
+        }
+
+        # Build filter XML
+        $filterXml = "<filter><account>$userId</account>"
+
+        if ($hasStartTime -and $hasEndTime) {
+            $fromTimestamp = $StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+            $toTimestamp = $EndTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+            $filterXml += "<from>$fromTimestamp</from><to>$toTimestamp</to>"
+            Write-Verbose "Date range filter: $fromTimestamp to $toTimestamp"
+        }
+        else {
+            Write-Verbose "No date range specified - API will default to last 14 days"
+        }
+
+        if ($PSBoundParameters.ContainsKey('Area')) {
+            $filterXml += "<area>$Area</area>"
+            Write-Verbose "Area filter: $Area"
+        }
+
+        $filterXml += "</filter>"
+
+        Write-Verbose "=== API Request Details ==="
+        Write-Verbose "Method: PUT"
+        Write-Verbose "URI: $uri"
+        Write-Verbose "Request Body: $filterXml"
+
+        # Make API call
+        $response = Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -Body $filterXml -ErrorAction Stop
+
+        Write-Verbose "=== API Response Received ==="
+        Write-Verbose "Response Type: $($response.GetType().FullName)"
+
+        # Parse response
+        $records = @()
+        if ($response.audit.record) {
+            # Normalize to array
+            if ($response.audit.record -is [System.Array]) {
+                $records = $response.audit.record
+                Write-Verbose "Found $($records.Count) audit log records"
+            }
+            else {
+                $records = @($response.audit.record)
+                Write-Verbose "Found 1 audit log record"
+            }
+        }
+        else {
+            Write-Verbose "No audit log records found in response"
+            return
+        }
+
+        # Process and output each record
+        foreach ($record in $records) {
+            [PSCustomObject]@{
+                Time      = if ($record.time) { $record.time } else { $null }
+                Account   = if ($record.account) { $record.account } else { $null }
+                Message   = if ($record.message) { $record.message } else { '' }
+                Area      = if ($record.area) { $record.area } else { $null }
+                Company   = if ($record.company) { $record.company } else { $null }
+                Acl       = if ($record.acl) { $record.acl } else { $null }
+                Method    = if ($record.method) { $record.method } else { $null }
+                Allowed   = if ($record.allowed -eq 'true' -or $record.allowed -eq $true) { $true } else { $false }
+                Succeeded = if ($record.succeeded -eq 'true' -or $record.succeeded -eq $true) { $true } else { $false }
+                ClientIP  = if ($record.'client-ip') { $record.'client-ip' } else { $null }
+                Device    = if ($record.device) { $record.device } else { $null }
+                Token     = if ($record.token) { $record.token } else { $null }
+            }
+        }
+
+        Write-Verbose "=== End Get-KeepitAuditLog ==="
+    }
+    catch {
+        throw "Failed to retrieve audit logs: $($_.Exception.Message)"
     }
 }
 
