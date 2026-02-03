@@ -484,5 +484,29 @@ TotalItems JobCount ItemsBySnapshot
 ---------- -------- ---------------
          2        1 {[2026-01-13T16:49:10Z, 2]}
 ```
-The extra "WARNING" message is Search-KeepitSnapshot saying it didn't find anything at the original /OneDrive/ path; this is expected. In this case, the tool found 2 deleted files that were deleted within a single snapshot period, so they could be restored in a single job. To actually restore them, you'd run the same cmdlet again without the `-WhatIf` switch.         
+The extra "WARNING" message is Search-KeepitSnapshot saying it didn't find anything at the original /OneDrive/ path; this is expected. In this case, the tool found 2 deleted files that were deleted within a single snapshot period, so they could be restored in a single job. To actually restore them, you'd run the same cmdlet again without the `-WhatIf` switch.
+
+## Utility Scripts
+
+In addition to the module cmdlets, this repository contains standalone scripts for specific tasks.
+
+### stop_start_backup.ps1
+
+This script allows you to directly interact with Keepit APIs to stop (disable backup and cancel jobs) or start (enable and trigger) backups for a specific user account across all data centers.
+
+#### Features
+
+- **Auto-Discovery**: Finds the user account by searching across all Keepit data centers.
+- **Bulk Action**: Applies the selected action to all devices associated with the found account.
+- **Stop Mode**: Sets `disable_backup` attribute to `1` and cancels all active (scheduled, running, queued) jobs.
+- **Start Mode**: Removes the `disable_backup` attribute and immediately triggers a new backup job.
+
+#### Usage
+
+Run the script directly in PowerShell. It will prompt for your Keepit credentials and the desired action.
+
+```powershell
+.\stop_start_backup.ps1
+```
+         
 
