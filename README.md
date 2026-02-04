@@ -508,5 +508,23 @@ Run the script directly in PowerShell. It will prompt for your Keepit credential
 ```powershell
 .\stop_start_backup.ps1
 ```
+
+### stop_start_stagger.ps1
+
+An enhanced version of the stop/start script that operates on a Target Account ID and allows for staggered start times to avoid overwhelming resources or hitting API limits.
+
+#### Features
+
+- **Target Account Selection**: Prompts for a specific Account ID to operate on.
+- **Device Selection UI**: Provides a pop-up window (`Out-GridView`) to select which specific connectors/devices to process.
+- **Staggered Starts**: Option to stagger backup job start times by a user-defined interval (e.g., 15 minutes).
+- **Robust Scheduling**: Includes a safety buffer and automatic retry logic with time-shifting to handle "400 Bad Request" errors caused by clock skew or past-timestamp issues.
+- **Summary Report**: Displays a final status table for all processed devices.
+
+#### Usage
+
+```powershell
+.\stop_start_stagger.ps1
+```
          
 
