@@ -498,9 +498,11 @@ An enhanced version of the stop/start script that operates on a Target Account I
 
 - **Target Account Selection**: Prompts for a specific Account ID to operate on.
 - **Device Selection UI**: Provides a pop-up window (`Out-GridView`) to select which specific connectors/devices to process.
-- **Staggered Starts**: Option to stagger backup job start times by a user-defined interval (e.g., 15 minutes).
+- **High Performance**: Uses concurrent processing (20 threads) for both fetching device metadata and executing actions, significantly reducing execution time for large accounts.
+- **Staggered & Batched Starts**: Option to stagger backup job starts by batches (e.g., start 4 jobs every 30 minutes).
+- **Load Balancing (Mixing Logic)**: Automatically re-orders selected devices to mix largest and smallest connectors, ensuring a balanced workload during staggered starts.
 - **Robust Scheduling**: Includes a safety buffer and automatic retry logic with time-shifting to handle "400 Bad Request" errors caused by clock skew or past-timestamp issues.
-- **Summary Report**: Displays a final status table for all processed devices.
+- **Enhanced Reporting**: Displays a final status table and automatically exports a detailed CSV report to your desktop.
 
 #### Usage
 
