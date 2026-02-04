@@ -490,25 +490,6 @@ The extra "WARNING" message is Search-KeepitSnapshot saying it didn't find anyth
 
 In addition to the module cmdlets, this repository contains standalone scripts for specific tasks.
 
-### stop_start_backup.ps1
-
-This script allows you to directly interact with Keepit APIs to stop (disable backup and cancel jobs) or start (enable and trigger) backups for a specific user account across all data centers.
-
-#### Features
-
-- **Auto-Discovery**: Finds the user account by searching across all Keepit data centers.
-- **Bulk Action**: Applies the selected action to all devices associated with the found account.
-- **Stop Mode**: Sets `disable_backup` attribute to `1` and cancels all active (scheduled, running, queued) jobs.
-- **Start Mode**: Removes the `disable_backup` attribute and immediately triggers a new backup job.
-
-#### Usage
-
-Run the script directly in PowerShell. It will prompt for your Keepit credentials and the desired action.
-
-```powershell
-.\stop_start_backup.ps1
-```
-
 ### stop_start_stagger.ps1
 
 An enhanced version of the stop/start script that operates on a Target Account ID and allows for staggered start times to avoid overwhelming resources or hitting API limits.
