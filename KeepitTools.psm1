@@ -794,9 +794,12 @@ function Disconnect-KeepitService {
                      dsl, jira, confluence, bamboohr, docusign, jsm, okta, miro, gitlab, monday
     - Display names: 'Microsoft 365', 'Entra ID', 'Jira Service Management', etc.
     If not specified, returns all connector types.
-.PARAMETER All
-    When specified, includes all connectors in the response, including those that may normally
-    be filtered out. Appends '?all=1' to the API request.
+.PARAMETER IncludeDeleted
+    When specified, includes deleted connectors in the response. Appends '?all=1' to the API request.
+    Deleted connectors have a deletion-deadline set and will have Deleted = $true in the output.
+.PARAMETER Raw
+    When specified, returns the raw XML response from the API instead of parsed connector objects.
+    Useful for debugging or when you need access to all XML elements.
 .EXAMPLE
     Get-KeepitConnector
 
@@ -830,11 +833,19 @@ function Disconnect-KeepitService {
 
     Retrieves connectors and filters for production environments
 .EXAMPLE
-    Get-KeepitConnector -All
+    Get-KeepitConnector -IncludeDeleted
 
-    Retrieves all connectors including those normally filtered out
+    Retrieves all connectors including deleted ones (those with a deletion-deadline set)
+.EXAMPLE
+    Get-KeepitConnector -Raw
+
+    Returns the raw XML response from the API
+.EXAMPLE
+    Get-KeepitConnector -Raw -IncludeDeleted | Out-File connectors.xml
+
+    Saves raw XML including deleted connectors to a file
 .OUTPUTS
-    PSCustomObject[] - Array of connector objects with properties:
+    PSCustomObject[] - Array of connector objects with properties (default):
         - ConnectorGuid: Connector GUID (lowercase)
         - Name: Connector name (max 200 characters)
         - Type: Connector type (e.g., 'o365-admin')
@@ -844,9 +855,11 @@ function Disconnect-KeepitService {
         - RetentionUpdated: Last retention update timestamp
         - OrgLink: Organization link (if available)
         - Deleted: Boolean indicating if connector is marked for deletion (has deletion-deadline)
+
+    String - Raw XML response from the API (when -Raw is specified)
 .NOTES
     Only returns accessible connectors. Use -Type to filter by connector type.
-    Use -All to include all connectors, including those normally filtered out.
+    Use -IncludeDeleted to include connectors that have been marked for deletion.
 #>
 function Get-KeepitConnector {
     [CmdletBinding()]
@@ -861,7 +874,10 @@ function Get-KeepitConnector {
         [string[]]$Type,
 
         [Parameter(Mandatory = $false)]
-        [switch]$All
+        [switch]$IncludeDeleted,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Raw
     )
 
     try {
@@ -889,9 +905,9 @@ function Get-KeepitConnector {
 
         # Build request
         $uri = "$baseUrl/users/$userId/devices"
-        if ($All) {
+        if ($IncludeDeleted) {
             $uri += '?all=1'
-            Write-Verbose "Including all connectors (all=1)"
+            Write-Verbose "Including deleted connectors (all=1)"
         }
         $headers = @{
             'Authorization' = $authHeader
@@ -900,6 +916,13 @@ function Get-KeepitConnector {
         }
 
         Write-Verbose "Fetching connectors from: $uri"
+
+        # If -Raw is specified, return the raw XML response
+        if ($Raw) {
+            Write-Verbose "Returning raw XML response"
+            $webResponse = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+            return $webResponse.Content
+        }
 
         # Make API call
         $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
@@ -1106,6 +1129,23 @@ function Get-KeepitSnapshot {
             if (-not $Reverse -and $StartTime -gt $EndTime) {
                 throw "StartTime cannot be later than EndTime. StartTime: $($StartTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), EndTime: $($EndTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
             }
+
+            # Normalize times to UTC for consistent comparison with API times (which are UTC)
+            # If Kind is Unspecified, treat as UTC (consistent with API behavior)
+            # If Kind is Local, convert to UTC
+            if ($StartTime.Kind -eq [DateTimeKind]::Unspecified) {
+                $StartTime = [DateTime]::SpecifyKind($StartTime, [DateTimeKind]::Utc)
+            }
+            elseif ($StartTime.Kind -eq [DateTimeKind]::Local) {
+                $StartTime = $StartTime.ToUniversalTime()
+            }
+            if ($EndTime.Kind -eq [DateTimeKind]::Unspecified) {
+                $EndTime = [DateTime]::SpecifyKind($EndTime, [DateTimeKind]::Utc)
+            }
+            elseif ($EndTime.Kind -eq [DateTimeKind]::Local) {
+                $EndTime = $EndTime.ToUniversalTime()
+            }
+            Write-Verbose "Date range (UTC): $($StartTime.ToString('yyyy-MM-ddTHH:mm:ssZ')) to $($EndTime.ToString('yyyy-MM-ddTHH:mm:ssZ'))"
         }
 
         # Get authentication header and base URL once for all pipeline items
@@ -1468,15 +1508,19 @@ function Get-KeepitSnapshot {
     and all jobs within the date range are returned.
     Jobs are filtered based on their Start time (or Scheduled time if Start is not available).
     Only jobs with dates on or before EndTime are included.
-.PARAMETER Active
-    Shows only jobs that are currently running (Active = True).
-    Can be combined with -Completed and -Scheduled using OR logic.
 .PARAMETER Completed
     Shows only jobs that have finished (End time has a value).
-    Can be combined with -Active and -Scheduled using OR logic.
+    Can be combined with -Scheduled using OR logic.
 .PARAMETER Scheduled
     Shows only pending scheduled jobs (Scheduled has a value, Active = False, and no End value).
-    Can be combined with -Active and -Completed using OR logic.
+    Can be combined with -Completed using OR logic.
+.PARAMETER Raw
+    Returns the raw XML response from the API instead of parsed PowerShell objects.
+    Useful for debugging or when you need the complete API response.
+.PARAMETER ActiveOnly
+    Adds the active-only filter to the API request, causing the server to return only
+    jobs that are currently active (running). This is more efficient than client-side
+    filtering when you only need active jobs, as the filtering is done server-side.
 .EXAMPLE
     Get-KeepitJobs -Connector "Production M365"
 
@@ -1502,14 +1546,6 @@ function Get-KeepitSnapshot {
 
     Gets all jobs for all connectors
 .EXAMPLE
-    Get-KeepitConnector | Get-KeepitJobs -Type restore -Active
-
-    Gets all active restore jobs across all connectors
-.EXAMPLE
-    Get-KeepitJobs -Connector "Production M365" -Active
-
-    Gets only currently running jobs for the connector
-.EXAMPLE
     Get-KeepitJobs -Connector "Production M365" -Completed
 
     Gets only completed jobs for the connector
@@ -1518,9 +1554,13 @@ function Get-KeepitSnapshot {
 
     Gets only scheduled (pending) jobs for the connector
 .EXAMPLE
-    Get-KeepitJobs -Connector "Production M365" -Active -Scheduled
+    Get-KeepitJobs -Connector "Production M365" -Raw
 
-    Gets jobs that are either running or scheduled (excludes completed jobs)
+    Returns the raw XML response from the API for debugging purposes
+.EXAMPLE
+    Get-KeepitJobs -Connector "Production M365" -ActiveOnly
+
+    Gets only active jobs using server-side filtering.
 .OUTPUTS
     PSCustomObject containing job details with properties:
         - JobGuid: The job GUID
@@ -1532,6 +1572,8 @@ function Get-KeepitSnapshot {
         - Scheduled: Scheduled start time
         - Start: Actual start time
         - End: Completion time (if completed)
+
+    When -Raw is specified, returns the raw XML response as a string.
 .NOTES
     Requires an active connection via Connect-KeepitService.
     Accepts connector objects from Get-KeepitConnector via pipeline.
@@ -1564,22 +1606,25 @@ function Get-KeepitJobs {
         [DateTime]$EndTime,
 
         [Parameter(Mandatory = $false)]
-        [switch]$Active,
-
-        [Parameter(Mandatory = $false)]
         [switch]$Completed,
 
         [Parameter(Mandatory = $false)]
-        [switch]$Scheduled
+        [switch]$Scheduled,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Raw,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ActiveOnly
     )
 
     begin {
         Write-Verbose "Get-KeepitJobs"
 
         # Check if any status filters are specified
-        $hasStatusFilter = $Active -or $Completed -or $Scheduled
+        $hasStatusFilter = $Completed -or $Scheduled
         if ($hasStatusFilter) {
-            Write-Verbose "Status filter(s) specified: Active=$Active, Completed=$Completed, Scheduled=$Scheduled"
+            Write-Verbose "Status filter(s) specified: Completed=$Completed, Scheduled=$Scheduled"
         }
 
         # Validate date parameters
@@ -1605,7 +1650,24 @@ function Get-KeepitJobs {
             elseif ($StartTime -ge $EndTime) {
                 throw "StartTime must be less than EndTime. StartTime: $StartTime, EndTime: $EndTime"
             }
-            Write-Verbose "Date range filter: $StartTime to $EndTime"
+
+            # Normalize times to UTC for consistent comparison with API times (which are UTC)
+            # If Kind is Unspecified, treat as UTC (consistent with API behavior)
+            # If Kind is Local, convert to UTC
+            if ($StartTime.Kind -eq [DateTimeKind]::Unspecified) {
+                $StartTime = [DateTime]::SpecifyKind($StartTime, [DateTimeKind]::Utc)
+            }
+            elseif ($StartTime.Kind -eq [DateTimeKind]::Local) {
+                $StartTime = $StartTime.ToUniversalTime()
+            }
+            if ($EndTime.Kind -eq [DateTimeKind]::Unspecified) {
+                $EndTime = [DateTime]::SpecifyKind($EndTime, [DateTimeKind]::Utc)
+            }
+            elseif ($EndTime.Kind -eq [DateTimeKind]::Local) {
+                $EndTime = $EndTime.ToUniversalTime()
+            }
+
+            Write-Verbose "Date range filter (UTC): $($StartTime.ToString('yyyy-MM-ddTHH:mm:ssZ')) to $($EndTime.ToString('yyyy-MM-ddTHH:mm:ssZ'))"
             $useFutureFilter = $false
         }
         else {
@@ -1649,18 +1711,27 @@ function Get-KeepitJobs {
 
             # Build request
             $uri = "$baseUrl/users/$userId/devices/$connectorGuid/jobs"
+            $activeJobsOnlyValue = if ($ActiveOnly) { 'true' } else { 'false' }
             $headers = @{
                 'Authorization' = $authHeader
                 'Content-Type' = 'application/xml'
-                'active-jobs-only' = 'false'
+                'active-jobs-only' = $activeJobsOnlyValue
             }
 
             Write-Verbose "=== API Request Details ==="
             Write-Verbose "Method: GET"
             Write-Verbose "URI: $uri"
-            Write-Verbose "active-jobs-only: false (retrieving all jobs)"
+            Write-Verbose "active-jobs-only: $activeJobsOnlyValue"
 
             Write-Verbose "=== Sending API Request ==="
+
+            # If -Raw is specified, return the raw XML response
+            if ($Raw) {
+                Write-Verbose "Returning raw XML response"
+                $webResponse = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+                $webResponse.Content
+                return
+            }
 
             # Make API call
             $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
@@ -1714,9 +1785,13 @@ function Get-KeepitJobs {
                         }
 
                         if ($jobDateTime) {
+                            # Ensure job time is UTC for comparison
+                            if ($jobDateTime.Kind -ne [DateTimeKind]::Utc) {
+                                $jobDateTime = $jobDateTime.ToUniversalTime()
+                            }
                             # Only include jobs scheduled for the future
                             if ($jobDateTime -le $currentTime) {
-                                Write-Verbose "Skipping job $($job.guid) - date '$jobDateTime' is not in the future (current time: $currentTime)"
+                                Write-Verbose "Skipping job $($job.guid) - date '$($jobDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ'))' is not in the future (current time: $($currentTime.ToString('yyyy-MM-ddTHH:mm:ssZ')))"
                                 continue
                             }
                         }
@@ -1739,8 +1814,12 @@ function Get-KeepitJobs {
                     }
 
                     if ($jobDateTime) {
+                        # Ensure job time is UTC for comparison
+                        if ($jobDateTime.Kind -ne [DateTimeKind]::Utc) {
+                            $jobDateTime = $jobDateTime.ToUniversalTime()
+                        }
                         if ($jobDateTime -lt $StartTime -or $jobDateTime -gt $EndTime) {
-                            Write-Verbose "Skipping job $($job.guid) - date '$jobDateTime' is outside range $StartTime to $EndTime"
+                            Write-Verbose "Skipping job $($job.guid) - date '$($jobDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ'))' is outside range $($StartTime.ToString('yyyy-MM-ddTHH:mm:ssZ')) to $($EndTime.ToString('yyyy-MM-ddTHH:mm:ssZ'))"
                             continue
                         }
                     }
@@ -1767,12 +1846,6 @@ function Get-KeepitJobs {
                 # Apply status filters if specified (OR logic - match any specified filter)
                 if ($hasStatusFilter) {
                     $matchesFilter = $false
-
-                    # -Active: jobs where Active is True
-                    if ($Active -and $jobObject.Active -eq $true) {
-                        $matchesFilter = $true
-                        Write-Verbose "Job $($jobObject.JobGuid) matches -Active filter"
-                    }
 
                     # -Completed: jobs where End has a value
                     if ($Completed -and $null -ne $jobObject.End -and $jobObject.End -ne '') {
@@ -1806,13 +1879,199 @@ function Get-KeepitJobs {
 
 <#
 .SYNOPSIS
+    Cancels one or more running or scheduled jobs on a Keepit connector
+.DESCRIPTION
+    Cancels backup or restore jobs by sending a cancellation timestamp to the Keepit API.
+    Can cancel a single job by GUID, or all active and scheduled jobs on a connector
+    using the -All switch.
+
+    Supports pipeline input from Get-KeepitJobs for targeted cancellation.
+.PARAMETER Connector
+    The connector name or GUID. Can be piped from Get-KeepitConnector or Get-KeepitJobs.
+    Aliases: ConnectorGuid, Name
+.PARAMETER JobGuid
+    The GUID of the specific job to cancel. Accepts pipeline input from Get-KeepitJobs.
+.PARAMETER All
+    Cancel all active and scheduled jobs on the connector.
+.EXAMPLE
+    Stop-KeepitJob -Connector "Production M365" -JobGuid "abc123-def456-ghi789"
+
+    Cancels a specific job on the connector.
+.EXAMPLE
+    Stop-KeepitJob -Connector "Production M365" -All
+
+    Cancels all active and scheduled jobs on the connector.
+.EXAMPLE
+    Get-KeepitJobs -Connector "Production M365" -ActiveOnly | Stop-KeepitJob
+
+    Cancels all active jobs via pipeline.
+.EXAMPLE
+    Stop-KeepitJob -Connector "Production M365" -All -WhatIf
+
+    Shows what jobs would be cancelled without actually cancelling them.
+.OUTPUTS
+    PSCustomObject with properties:
+        - ConnectorGuid: The connector GUID
+        - ConnectorName: The connector name
+        - JobGuid: The job GUID
+        - Status: "Cancelled" or error message
+        - CancelledAt: UTC timestamp of the cancellation
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+    Supports -WhatIf and -Confirm via ShouldProcess.
+#>
+function Stop-KeepitJob {
+    [CmdletBinding(SupportsShouldProcess = $true, DefaultParameterSetName = 'Single')]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true,
+                   ParameterSetName = 'Single')]
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true,
+                   ParameterSetName = 'All')]
+        [ValidateNotNullOrEmpty()]
+        [Alias('ConnectorGuid', 'Name')]
+        [string]$Connector,
+
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true,
+                   ParameterSetName = 'Single')]
+        [ValidateNotNullOrEmpty()]
+        [string]$JobGuid,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'All')]
+        [switch]$All
+    )
+
+    begin {
+        Write-Verbose "Stop-KeepitJob: Initializing"
+
+        try {
+            $authHeader = Get-AuthHeader
+            $baseUrl = Get-KeepitBaseUrl
+            $userId = Get-KeepitUserId -AuthHeader $authHeader -BaseUrl $baseUrl
+            Write-Verbose "Base URL: $baseUrl, User ID: $userId"
+        }
+        catch {
+            throw "Failed to initialize: $($_.Exception.Message)"
+        }
+    }
+
+    process {
+        try {
+            # Resolve connector identity to GUID
+            $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $connectorGuid = $resolved.ConnectorGuid
+            $connectorName = $resolved.Name
+            Write-Verbose "Connector: $connectorName ($connectorGuid)"
+
+            if ($All) {
+                # Fetch active + scheduled jobs
+                $jobsToCancel = @()
+                try { $jobsToCancel += @(Get-KeepitJobs -Connector $connectorGuid -ActiveOnly) } catch { }
+                try { $jobsToCancel += @(Get-KeepitJobs -Connector $connectorGuid -Scheduled) } catch { }
+                $jobsToCancel = $jobsToCancel | Where-Object { $_ -and $_.JobGuid }
+
+                if ($jobsToCancel.Count -eq 0) {
+                    Write-Verbose "No active or scheduled jobs found for connector '$connectorName'"
+                    return
+                }
+
+                Write-Verbose "Found $($jobsToCancel.Count) job(s) to cancel"
+
+                foreach ($job in $jobsToCancel) {
+                    $timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+                    $cancelXml = "<job><cancelled>$timestamp</cancelled></job>"
+                    $uri = "$baseUrl/users/$userId/devices/$connectorGuid/jobs/$($job.JobGuid)"
+
+                    if ($PSCmdlet.ShouldProcess("$connectorName job $($job.JobGuid) ($($job.Type))", "Cancel")) {
+                        $headers = @{
+                            'Authorization' = $authHeader
+                            'Content-Type'  = 'application/xml'
+                        }
+                        try {
+                            Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -Body $cancelXml -ErrorAction Stop | Out-Null
+                            [PSCustomObject]@{
+                                ConnectorGuid = $connectorGuid
+                                ConnectorName = $connectorName
+                                JobGuid       = $job.JobGuid
+                                Status        = 'Cancelled'
+                                CancelledAt   = $timestamp
+                            }
+                        }
+                        catch {
+                            $errorMessage = $_.Exception.Message
+                            if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+                                try {
+                                    $errorXml = [xml]$_.ErrorDetails.Message
+                                    $errorMessage = "$($errorXml.error.code): $($errorXml.error.description)"
+                                }
+                                catch { }
+                            }
+                            Write-Error "Failed to cancel job $($job.JobGuid): $errorMessage"
+                            [PSCustomObject]@{
+                                ConnectorGuid = $connectorGuid
+                                ConnectorName = $connectorName
+                                JobGuid       = $job.JobGuid
+                                Status        = "Error: $errorMessage"
+                                CancelledAt   = $null
+                            }
+                        }
+                    }
+                }
+            }
+            else {
+                # Single job cancellation
+                $timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+                $cancelXml = "<job><cancelled>$timestamp</cancelled></job>"
+                $uri = "$baseUrl/users/$userId/devices/$connectorGuid/jobs/$JobGuid"
+
+                if ($PSCmdlet.ShouldProcess("$connectorName job $JobGuid", "Cancel")) {
+                    $headers = @{
+                        'Authorization' = $authHeader
+                        'Content-Type'  = 'application/xml'
+                    }
+                    try {
+                        Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -Body $cancelXml -ErrorAction Stop | Out-Null
+                        [PSCustomObject]@{
+                            ConnectorGuid = $connectorGuid
+                            ConnectorName = $connectorName
+                            JobGuid       = $JobGuid
+                            Status        = 'Cancelled'
+                            CancelledAt   = $timestamp
+                        }
+                    }
+                    catch {
+                        $errorMessage = $_.Exception.Message
+                        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+                            try {
+                                $errorXml = [xml]$_.ErrorDetails.Message
+                                $errorMessage = "$($errorXml.error.code): $($errorXml.error.description)"
+                            }
+                            catch { }
+                        }
+                        throw "Failed to cancel job $JobGuid on connector '$connectorName': $errorMessage"
+                    }
+                }
+            }
+        }
+        catch {
+            $errorGuid = if ($connectorGuid) { $connectorGuid } else { $Connector }
+            throw "Failed to cancel job(s) on connector '$errorGuid': $($_.Exception.Message)"
+        }
+    }
+}
+
+<#
+.SYNOPSIS
     Starts a backup job on a Keepit connector
 .DESCRIPTION
     Initiates a backup job for a specified Keepit connector. The backup can be started
-    immediately or scheduled for a future time.
+    immediately or scheduled for a future time using the -ScheduledTime parameter.
 .PARAMETER Connector
     The connector name or GUID to back up.
     Can be piped from Get-KeepitConnector.
+.PARAMETER ScheduledTime
+    Optional DateTime for scheduling the backup at a future time.
+    Must be in the future. Times are converted to UTC for the API.
+    If not specified, the backup starts immediately.
 .EXAMPLE
     Start-KeepitBackup -Connector "Production M365"
 
@@ -1825,14 +2084,22 @@ function Get-KeepitJobs {
     Get-KeepitConnector | Start-KeepitBackup
 
     Starts immediate backups for all connectors
+.EXAMPLE
+    Start-KeepitBackup -Connector "Production M365" -ScheduledTime (Get-Date).AddMinutes(30)
+
+    Schedules a backup to run 30 minutes from now
+.EXAMPLE
+    Start-KeepitBackup -Connector "Production M365" -ScheduledTime "2026-06-15T14:00:00"
+
+    Schedules a backup for a specific date and time
 .OUTPUTS
     PSCustomObject containing backup job details with properties:
         - ConnectorGuid: The connector GUID
         - Type: Job type (backup)
         - Description: Job description
-        - Status: Job status ("Active", "Pending", "AlreadyQueued", or "AlreadyRunning")
-        - Scheduled: Scheduled start time
-        - Priority: Job priority
+        - Status: Job status ("Active", "Pending", "Scheduled", "AlreadyQueued", or "AlreadyRunning")
+        - CreatedAt: Timestamp when the job was created
+        - ScheduledTime: Scheduled start time (when -ScheduledTime is used)
 
     When Status is "AlreadyQueued" or "AlreadyRunning", additional properties are included:
         - ErrorCode: The API error code ("WAITING_JOB_TO_START" or "RUNNING_JOB")
@@ -1853,7 +2120,10 @@ function Start-KeepitBackup {
         [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
         [ValidateNotNullOrEmpty()]
         [Alias('ConnectorGuid', 'Name')]
-        [string]$Connector
+        [string]$Connector,
+
+        [Parameter(Mandatory = $false)]
+        [DateTime]$ScheduledTime
     )
 
     begin {
@@ -1883,10 +2153,23 @@ function Start-KeepitBackup {
             Write-Verbose "=== Start-KeepitBackup: Processing Connector ==="
             Write-Verbose "Connector: $($resolved.Name) ($connectorGuid)"
 
+            # Validate ScheduledTime if provided
+            if ($PSBoundParameters.ContainsKey('ScheduledTime')) {
+                if ($ScheduledTime.ToUniversalTime() -lt (Get-Date).ToUniversalTime()) {
+                    Write-Error "ScheduledTime must be in the future."
+                    return
+                }
+            }
+
             # Build XML request body
-            $xmlBody = '<job><description>User-requested backup</description><type>backup</type>'
-                $xmlBody += '<immediate />'
-            $xmlBody += '<commands><backup /></commands></job>'
+            if ($PSBoundParameters.ContainsKey('ScheduledTime')) {
+                $timeStr = $ScheduledTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+                Write-Verbose "Scheduling backup for $timeStr"
+                $xmlBody = "<job><start>$timeStr</start><description>User-requested backup</description><type>backup</type><commands><backup /></commands></job>"
+            }
+            else {
+                $xmlBody = '<job><description>User-requested backup</description><type>backup</type><immediate /><commands><backup /></commands></job>'
+            }
 
             Write-Verbose "=== API Request Details ==="
             Write-Verbose "Method: POST"
@@ -2154,17 +2437,28 @@ function Start-KeepitBackup {
             Write-Verbose "Successfully parsed job. JobGuid: $($job.guid)"
 
             # Create and output job object
+            $statusValue = if ($PSBoundParameters.ContainsKey('ScheduledTime')) {
+                'Scheduled'
+            } elseif ($job.active -eq $true -or $job.active -eq 'true') {
+                'Active'
+            } else {
+                'Pending'
+            }
+            $scheduledTimeValue = if ($PSBoundParameters.ContainsKey('ScheduledTime')) { $timeStr } else { $null }
+
             $jobObject = [PSCustomObject]@{
                 ConnectorGuid = $connectorGuid
                 Type = if ($job.type) { $job.type } else { 'backup' }
                 Description = if ($job.description) { $job.description } else { 'User-requested backup' }
-                Status = if ($job.active -eq $true -or $job.active -eq 'true') { 'Active' } else { 'Pending' }
+                Status = $statusValue
                 CreatedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+                ScheduledTime = $scheduledTimeValue
             }
 
             Write-Verbose "=== Job Created Successfully ==="
             Write-Verbose "Type: $($jobObject.Type)"
             Write-Verbose "Status: $($jobObject.Status)"
+            if ($scheduledTimeValue) { Write-Verbose "ScheduledTime: $scheduledTimeValue" }
             Write-Verbose "CreatedAt: $($jobObject.CreatedAt)"
             Write-Verbose "=== End Start-KeepitBackup ==="
 
@@ -6563,6 +6857,567 @@ function Get-KeepitAuditLog {
     }
     catch {
         throw "Failed to retrieve audit logs: $($_.Exception.Message)"
+    }
+}
+
+<#
+.SYNOPSIS
+    Lists all shared secure links for the authenticated user
+.DESCRIPTION
+    Retrieves all share links created by the authenticated Keepit user. Each share represents
+    a secure link to a file or folder hierarchy from a backup snapshot. Returns share metadata
+    including expiration, password protection status, and associated connector.
+.EXAMPLE
+    Get-KeepitShare
+
+    Lists all active shares for the connected user
+.EXAMPLE
+    Get-KeepitShare | Where-Object { $_.HasPassword -eq $false }
+
+    Lists all shares that are not password-protected
+.OUTPUTS
+    PSCustomObject[] - Array of share objects with properties:
+        - ShareId: The share GUID
+        - Path: The shared path
+        - Created: Creation timestamp
+        - Expires: Expiration timestamp
+        - ConnectorGuid: The connector GUID
+        - Snapshot: The snapshot ID (if pinned to a specific snapshot)
+        - HasPassword: Whether the share is password-protected
+        - DisplayName: Human-readable alias
+        - Size: Size of shared data
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+#>
+function Get-KeepitShare {
+    [CmdletBinding()]
+    param()
+
+    try {
+        Write-Verbose "=== Get-KeepitShare ==="
+
+        # Get authentication header and base URL
+        $authHeader = Get-AuthHeader
+        $baseUrl = Get-KeepitBaseUrl
+        Write-Verbose "Base URL: $baseUrl"
+
+        # Build request
+        $uri = "$baseUrl/share/"
+        $headers = @{
+            'Authorization' = $authHeader
+            'Content-Type'  = 'application/xml'
+        }
+
+        Write-Verbose "=== API Request Details ==="
+        Write-Verbose "Method: GET"
+        Write-Verbose "URI: $uri"
+
+        # Make API call
+        $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+
+        Write-Verbose "=== API Response Received ==="
+        Write-Verbose "Response Type: $($response.GetType().FullName)"
+
+        # Parse response
+        $shares = @()
+        if ($response.shares.share) {
+            # Normalize to array
+            if ($response.shares.share -is [System.Array]) {
+                $shares = $response.shares.share
+                Write-Verbose "Found $($shares.Count) shares"
+            }
+            else {
+                $shares = @($response.shares.share)
+                Write-Verbose "Found 1 share"
+            }
+        }
+        else {
+            Write-Verbose "No shares found"
+            return
+        }
+
+        # Process and output each share
+        foreach ($share in $shares) {
+            [PSCustomObject]@{
+                ShareId       = if ($share.guid) { $share.guid } else { $null }
+                Path          = if ($share.path) { $share.path } else { $null }
+                Created       = if ($share.created) { $share.created } else { $null }
+                Expires       = if ($share.expires) { $share.expires } else { $null }
+                ConnectorGuid = if ($share.device) { $share.device } else { $null }
+                Snapshot      = if ($share.snapshot -and $share.snapshot -ne '') { $share.snapshot } else { $null }
+                HasPassword   = if ($share.password -and $share.password -ne '') { $true } else { $false }
+                DisplayName   = if ($share.dname) { $share.dname } else { $null }
+                Size          = if ($share.size) { [long]$share.size } else { $null }
+            }
+        }
+
+        Write-Verbose "=== End Get-KeepitShare ==="
+    }
+    catch {
+        throw "Failed to retrieve shares: $($_.Exception.Message)"
+    }
+}
+
+<#
+.SYNOPSIS
+    Creates a new shared secure link for a backup path
+.DESCRIPTION
+    Generates a share link for a file or folder hierarchy from a Keepit backup.
+    The share can optionally be password-protected and set to expire after a given period.
+    If no snapshot is specified, the latest snapshot is used.
+.PARAMETER Connector
+    Name or GUID of the Keepit connector. Accepts pipeline input by property name.
+.PARAMETER Path
+    The path to share. Must start with /. Directory paths must end with /.
+    File paths must end with the filename.
+.PARAMETER Lifetime
+    ISO 8601 duration for how long the share should remain active (e.g., P30D for 30 days,
+    PT1H for 1 hour). If not specified, the share does not expire.
+.PARAMETER Snapshot
+    Specific snapshot ID to pin the share to. If not specified, the latest snapshot is used.
+.PARAMETER Password
+    SecureString password to protect the share. Recipients will need to provide this password
+    to access the shared content.
+.EXAMPLE
+    New-KeepitShare -Connector "Production M365" -Path "/user@example.com/"
+
+    Creates an unprotected share of the user's folder hierarchy using the latest snapshot
+.EXAMPLE
+    Get-KeepitConnector -Name "Exchange" | New-KeepitShare -Path "/user@example.com/" -Lifetime "P30D"
+
+    Creates a share that expires in 30 days via pipeline
+.EXAMPLE
+    $pw = Read-Host -AsSecureString "Share password"
+    New-KeepitShare -Connector "abc123-def456-ghi789" -Path "/data/report.pdf" -Password $pw
+
+    Creates a password-protected share for a single file
+.OUTPUTS
+    PSCustomObject with properties:
+        - ShareId: The GUID of the newly created share
+        - ShareUrl: The full URL to access the share
+        - ConnectorGuid: The connector GUID
+        - Path: The shared path
+        - Lifetime: The share lifetime (if specified)
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+    Path rules: must start with /, directories end with /, files end with filename.
+#>
+function New-KeepitShare {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('ConnectorGuid', 'Name')]
+        [string]$Connector,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [ValidatePattern('^P(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(\d+H)?(\d+M)?(\d+S)?)?$')]
+        [string]$Lifetime,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Snapshot,
+
+        [Parameter(Mandatory = $false)]
+        [SecureString]$Password
+    )
+
+    begin {
+        Write-Verbose "=== New-KeepitShare: Initialization ==="
+
+        # Get authentication header and base URL once for all pipeline items
+        try {
+            $authHeader = Get-AuthHeader
+            $baseUrl = Get-KeepitBaseUrl
+            Write-Verbose "Base URL: $baseUrl"
+            Write-Verbose "Initialization completed successfully"
+        }
+        catch {
+            throw "Failed to initialize: $($_.Exception.Message)"
+        }
+    }
+
+    process {
+        try {
+            # Resolve connector identity to GUID
+            $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $connectorGuid = $resolved.ConnectorGuid
+            Write-Verbose "=== New-KeepitShare: Processing Connector ==="
+            Write-Verbose "Connector: $($resolved.Name) ($connectorGuid)"
+
+            # XML-escape the path
+            $escapedPath = [System.Security.SecurityElement]::Escape($Path)
+
+            # Build XML request body
+            $xmlBody = "<share><device>$connectorGuid</device><path>$escapedPath</path>"
+
+            if ($PSBoundParameters.ContainsKey('Lifetime')) {
+                $xmlBody += "<lifetime>$Lifetime</lifetime>"
+            }
+
+            if ($PSBoundParameters.ContainsKey('Snapshot')) {
+                $escapedSnapshot = [System.Security.SecurityElement]::Escape($Snapshot)
+                $xmlBody += "<snapshot>$escapedSnapshot</snapshot>"
+            }
+
+            if ($PSBoundParameters.ContainsKey('Password')) {
+                # Convert SecureString to plain text
+                $tempCred = New-Object System.Management.Automation.PSCredential('unused', $Password)
+                $plainPassword = $tempCred.GetNetworkCredential().Password
+                $escapedPassword = [System.Security.SecurityElement]::Escape($plainPassword)
+                $xmlBody += "<password>$escapedPassword</password>"
+            }
+
+            $xmlBody += "</share>"
+
+            Write-Verbose "=== API Request Details ==="
+            Write-Verbose "Method: POST"
+            Write-Verbose "URI: $baseUrl/share/"
+            Write-Verbose "Content-Type: application/xml"
+            Write-Verbose "Request Body:`n$xmlBody"
+
+            # Build request
+            $uri = "$baseUrl/share/"
+            $headers = @{
+                'Authorization' = $authHeader
+                'Content-Type'  = 'application/xml'
+            }
+
+            Write-Verbose "=== Sending API Request ==="
+
+            # Use Invoke-WebRequest to capture Location header
+            $webResponse = Invoke-WebRequest -Uri $uri -Method Post -Headers $headers -Body $xmlBody -SkipHttpErrorCheck
+
+            Write-Verbose "=== API Response Received ==="
+            Write-Verbose "Status Code: $($webResponse.StatusCode)"
+
+            # Check for HTTP errors
+            if ($webResponse.StatusCode -ge 400) {
+                $errorBody = $webResponse.Content
+                Write-Verbose "Error response body: $errorBody"
+
+                $apiError = $null
+                if ($errorBody) {
+                    try {
+                        $errorXml = [xml]$errorBody
+                        $apiError = [PSCustomObject]@{
+                            Code        = $errorXml.error.code
+                            Description = $errorXml.error.description
+                        }
+                        Write-Verbose "Parsed API Error - Code: $($apiError.Code), Description: $($apiError.Description)"
+                    }
+                    catch {
+                        Write-Verbose "Could not parse error response as XML: $($_.Exception.Message)"
+                    }
+                }
+
+                if ($apiError -and $apiError.Code) {
+                    throw "Failed to create share: [$($apiError.Code)] $($apiError.Description)"
+                }
+                else {
+                    throw "Failed to create share: HTTP $($webResponse.StatusCode) - $errorBody"
+                }
+            }
+
+            # Extract share GUID from Location header
+            $shareId = $null
+            $shareUrl = $null
+            $locationHeader = $null
+            if ($webResponse.Headers -and $webResponse.Headers.ContainsKey('Location')) {
+                $locationValue = $webResponse.Headers['Location']
+                $locationHeader = if ($locationValue -is [System.Array]) { $locationValue[0] } else { $locationValue }
+            }
+
+            if ($locationHeader) {
+                Write-Verbose "Location header: $locationHeader"
+                $shareUrl = $locationHeader
+
+                # Extract GUID from Location URL (e.g., /share/{guid}/ or https://host/share/{guid}/)
+                if ($locationHeader -match '/share/([0-9a-fA-F-]+)') {
+                    $shareId = $Matches[1]
+                    Write-Verbose "Extracted share GUID from Location header: $shareId"
+                }
+            }
+
+            # Build and return result object
+            [PSCustomObject]@{
+                ShareId       = $shareId
+                ShareUrl      = $shareUrl
+                ConnectorGuid = $connectorGuid
+                Path          = $Path
+                Lifetime      = if ($PSBoundParameters.ContainsKey('Lifetime')) { $Lifetime } else { $null }
+            }
+
+            Write-Verbose "=== Share Created Successfully ==="
+        }
+        catch {
+            $errorMessage = $_.Exception.Message
+            if ($errorMessage -like "Failed to create share:*") {
+                throw
+            }
+            throw "Failed to create share: $errorMessage"
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Updates properties of an existing shared secure link
+.DESCRIPTION
+    Modifies the lifetime, password, or snapshot of an existing share. Only specified
+    properties are updated; unspecified properties remain unchanged. Use -ClearPassword
+    to remove password protection, and -ClearSnapshot to unpin from a specific snapshot.
+.PARAMETER ShareId
+    The GUID of the share to update. Accepts pipeline input by property name.
+.PARAMETER Lifetime
+    New ISO 8601 duration for the share (e.g., P7D for 7 days). Empty string means never expire.
+.PARAMETER Password
+    New SecureString password for the share.
+.PARAMETER ClearPassword
+    Switch to remove password protection from the share.
+.PARAMETER Snapshot
+    New snapshot ID to pin the share to.
+.PARAMETER ClearSnapshot
+    Switch to unpin the share from a specific snapshot (reverts to latest).
+.EXAMPLE
+    Set-KeepitShare -ShareId "abc123-def456" -Lifetime "P7D"
+
+    Updates the share to expire in 7 days
+.EXAMPLE
+    Get-KeepitShare | Set-KeepitShare -Lifetime "P7D"
+
+    Updates all shares to expire in 7 days via pipeline
+.EXAMPLE
+    Set-KeepitShare -ShareId "abc123-def456" -ClearPassword
+
+    Removes password protection from the share
+.EXAMPLE
+    Set-KeepitShare -ShareId "abc123-def456" -Lifetime "P7D" -WhatIf
+
+    Shows what would happen without making changes
+.OUTPUTS
+    PSCustomObject with properties:
+        - ShareId: The share GUID
+        - Status: "Success" or error message
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+    Supports -WhatIf and -Confirm.
+    If -Password and -ClearPassword are both specified, -Password takes precedence.
+    If -Snapshot and -ClearSnapshot are both specified, -Snapshot takes precedence.
+#>
+function Set-KeepitShare {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$ShareId,
+
+        [Parameter(Mandatory = $false)]
+        [ValidatePattern('^P(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(\d+H)?(\d+M)?(\d+S)?)?$')]
+        [string]$Lifetime,
+
+        [Parameter(Mandatory = $false)]
+        [SecureString]$Password,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ClearPassword,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Snapshot,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ClearSnapshot
+    )
+
+    begin {
+        Write-Verbose "=== Set-KeepitShare: Initialization ==="
+
+        # Get authentication header and base URL once for all pipeline items
+        try {
+            $authHeader = Get-AuthHeader
+            $baseUrl = Get-KeepitBaseUrl
+            Write-Verbose "Base URL: $baseUrl"
+            Write-Verbose "Initialization completed successfully"
+        }
+        catch {
+            throw "Failed to initialize: $($_.Exception.Message)"
+        }
+    }
+
+    process {
+        try {
+            Write-Verbose "=== Set-KeepitShare: Processing Share $ShareId ==="
+
+            # Check if any changes were specified
+            $hasChanges = $PSBoundParameters.ContainsKey('Lifetime') -or
+                          $PSBoundParameters.ContainsKey('Password') -or
+                          $ClearPassword.IsPresent -or
+                          $PSBoundParameters.ContainsKey('Snapshot') -or
+                          $ClearSnapshot.IsPresent
+
+            if (-not $hasChanges) {
+                Write-Warning "No changes specified for share $ShareId. Use -Lifetime, -Password, -ClearPassword, -Snapshot, or -ClearSnapshot."
+                return
+            }
+
+            # Build XML body with only specified elements
+            $xmlBody = "<share>"
+
+            if ($PSBoundParameters.ContainsKey('Lifetime')) {
+                $xmlBody += "<lifetime>$Lifetime</lifetime>"
+            }
+
+            if ($PSBoundParameters.ContainsKey('Password')) {
+                # -Password takes precedence over -ClearPassword
+                $tempCred = New-Object System.Management.Automation.PSCredential('unused', $Password)
+                $plainPassword = $tempCred.GetNetworkCredential().Password
+                $escapedPassword = [System.Security.SecurityElement]::Escape($plainPassword)
+                $xmlBody += "<password>$escapedPassword</password>"
+            }
+            elseif ($ClearPassword.IsPresent) {
+                $xmlBody += "<password></password>"
+            }
+
+            if ($PSBoundParameters.ContainsKey('Snapshot')) {
+                # -Snapshot takes precedence over -ClearSnapshot
+                $escapedSnapshot = [System.Security.SecurityElement]::Escape($Snapshot)
+                $xmlBody += "<snapshot>$escapedSnapshot</snapshot>"
+            }
+            elseif ($ClearSnapshot.IsPresent) {
+                $xmlBody += "<snapshot></snapshot>"
+            }
+
+            $xmlBody += "</share>"
+
+            Write-Verbose "=== API Request Details ==="
+            Write-Verbose "Method: PUT"
+            Write-Verbose "URI: $baseUrl/share/$ShareId"
+            Write-Verbose "Content-Type: application/xml"
+            Write-Verbose "Request Body:`n$xmlBody"
+
+            if ($PSCmdlet.ShouldProcess("Share $ShareId", "Update share")) {
+                # Build request
+                $uri = "$baseUrl/share/$ShareId"
+                $headers = @{
+                    'Authorization' = $authHeader
+                    'Content-Type'  = 'application/xml'
+                }
+
+                Write-Verbose "=== Sending API Request ==="
+
+                $null = Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -Body $xmlBody -ErrorAction Stop
+
+                Write-Verbose "=== Share Updated Successfully ==="
+
+                [PSCustomObject]@{
+                    ShareId = $ShareId
+                    Status  = 'Success'
+                }
+            }
+        }
+        catch {
+            $errorMessage = $_.Exception.Message
+            if ($errorMessage -like "Failed to update share:*") {
+                throw
+            }
+            throw "Failed to update share: $errorMessage"
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Deletes a shared secure link
+.DESCRIPTION
+    Permanently removes a share link. The share URL will no longer be accessible.
+    Only shares owned by the authenticated user can be deleted.
+.PARAMETER ShareId
+    The GUID of the share to delete. Accepts pipeline input by property name.
+.EXAMPLE
+    Remove-KeepitShare -ShareId "abc123-def456"
+
+    Deletes the specified share
+.EXAMPLE
+    Get-KeepitShare | Remove-KeepitShare
+
+    Deletes all shares for the connected user
+.EXAMPLE
+    Get-KeepitShare | Where-Object ConnectorGuid -eq $guid | Remove-KeepitShare
+
+    Deletes all shares for a specific connector
+.EXAMPLE
+    Get-KeepitShare | Remove-KeepitShare -WhatIf
+
+    Shows which shares would be deleted without actually deleting them
+.OUTPUTS
+    PSCustomObject with properties:
+        - ShareId: The share GUID
+        - Status: "Success" or error message
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+    Supports -WhatIf and -Confirm.
+#>
+function Remove-KeepitShare {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$ShareId
+    )
+
+    begin {
+        Write-Verbose "=== Remove-KeepitShare: Initialization ==="
+
+        # Get authentication header and base URL once for all pipeline items
+        try {
+            $authHeader = Get-AuthHeader
+            $baseUrl = Get-KeepitBaseUrl
+            Write-Verbose "Base URL: $baseUrl"
+            Write-Verbose "Initialization completed successfully"
+        }
+        catch {
+            throw "Failed to initialize: $($_.Exception.Message)"
+        }
+    }
+
+    process {
+        try {
+            Write-Verbose "=== Remove-KeepitShare: Processing Share $ShareId ==="
+
+            if ($PSCmdlet.ShouldProcess("Share $ShareId", "Delete share")) {
+                # Build request
+                $uri = "$baseUrl/share/$ShareId"
+                $headers = @{
+                    'Authorization' = $authHeader
+                    'Content-Type'  = 'application/xml'
+                }
+
+                Write-Verbose "=== API Request Details ==="
+                Write-Verbose "Method: DELETE"
+                Write-Verbose "URI: $uri"
+
+                Write-Verbose "=== Sending API Request ==="
+
+                $null = Invoke-RestMethod -Uri $uri -Method Delete -Headers $headers -ErrorAction Stop
+
+                Write-Verbose "=== Share Deleted Successfully ==="
+
+                [PSCustomObject]@{
+                    ShareId = $ShareId
+                    Status  = 'Success'
+                }
+            }
+        }
+        catch {
+            $errorMessage = $_.Exception.Message
+            if ($errorMessage -like "Failed to delete share:*") {
+                throw
+            }
+            throw "Failed to delete share: $errorMessage"
+        }
     }
 }
 

@@ -3,7 +3,7 @@
     RootModule = 'KeepitTools.psm1'
 
     # Version number of this module
-    ModuleVersion = '0.9.7'
+    ModuleVersion = '0.9.9'
 
     # Supported PSEditions
     CompatiblePSEditions = @('Core')
@@ -68,6 +68,7 @@
         'Set-KeepitConnectorConfiguration',
         'Get-KeepitSnapshot',
         'Get-KeepitJobs',
+        'Stop-KeepitJob',
         'Start-KeepitBackup',
         'Search-KeepitSnapshot',
         'Convert-KeepitUPNToGuid',
@@ -76,7 +77,11 @@
         'Submit-KeepitJob',
         'Restore-KeepitBulkDeletedItems',
         'New-KeepitConnector',
-        'Get-KeepitAuditLog'
+        'Get-KeepitAuditLog',
+        'Get-KeepitShare',
+        'New-KeepitShare',
+        'Set-KeepitShare',
+        'Remove-KeepitShare'
     )
 
     # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry
@@ -114,6 +119,19 @@
 
             # ReleaseNotes of this module
             ReleaseNotes = @'
+Version 0.9.9
+- Stop-KeepitJob: New cmdlet to cancel running, scheduled, and queued jobs
+- Stop-KeepitJob: Support -All switch to cancel every active/scheduled job on a connector
+- Stop-KeepitJob: Support pipeline input from Get-KeepitJobs
+- Stop-KeepitJob: Support -WhatIf and -Confirm
+- Start-KeepitBackup: Add -ScheduledTime parameter for scheduling future backups
+
+Version 0.9.8
+- Get-KeepitShare: New cmdlet to list all shared secure links for the authenticated user
+- New-KeepitShare: New cmdlet to create shared secure links with optional password and expiry
+- Set-KeepitShare: New cmdlet to update share properties (lifetime, password, snapshot)
+- Remove-KeepitShare: New cmdlet to delete shared secure links
+
 Version 0.9.7
 - Get-KeepitJobs: Add -Active switch to show only currently running jobs
 - Get-KeepitJobs: Add -Completed switch to show only finished jobs

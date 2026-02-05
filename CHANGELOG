@@ -1,5 +1,33 @@
 # KeepitTools Changelog
 
+## Version 0.9.9
+
+- Stop-KeepitJob: New cmdlet to cancel running, scheduled, and queued jobs
+- Stop-KeepitJob: Support -All switch to cancel every active/scheduled job on a connector
+- Stop-KeepitJob: Support pipeline input from Get-KeepitJobs
+- Stop-KeepitJob: Support -WhatIf and -Confirm
+- Start-KeepitBackup: Add -ScheduledTime parameter for scheduling future backups
+
+## Version 0.9.8
+
+- Get-KeepitShare: New cmdlet to list all shared secure links for the authenticated user
+- New-KeepitShare: New cmdlet to create shared secure links with optional password and expiry
+- Set-KeepitShare: New cmdlet to update share properties (lifetime, password, snapshot)
+- Remove-KeepitShare: New cmdlet to delete shared secure links
+
+## Version 0.9.7
+
+- Get-KeepitJobs: Add -Active switch to show only currently running jobs
+- Get-KeepitJobs: Add -Completed switch to show only finished jobs
+- Get-KeepitJobs: Add -Scheduled switch to show only pending scheduled jobs
+
+## Version 0.9.6
+
+- Get-KeepitAuditLog: New cmdlet to retrieve audit log entries from the Keepit platform
+- Get-KeepitAuditLog: Support date range filtering with -StartTime and -EndTime
+- Get-KeepitAuditLog: Support -ResultSize parameter (default 100, max 10000)
+- Get-KeepitAuditLog: Support -Area filter for event categories
+
 ## Version 0.9.5
 
 - Get-KeepitConnector: Rename -All to -IncludeDeleted for clarity

@@ -119,6 +119,7 @@ Remove-Module KeepitTools
 | `New-KeepitConnector`              | Creates a new Keepit connector with specified type and config      |
 | `Get-KeepitSnapshot`               | Retrieves snapshot information (latest, range, or count)           |
 | `Get-KeepitJobs`                   | Retrieves active and future backup/restore jobs for a connector    |
+| `Stop-KeepitJob`                   | Cancels running or scheduled backup/restore jobs                   |
 | `Start-KeepitBackup`               | Starts immediate backup job on a connector                         |
 | `Search-KeepitSnapshot`            | Searches backup data using the BSearch API                         |
 | `Convert-KeepitUPNToGuid`          | Converts a User Principal Name to Keepit backup GUID               |
@@ -126,6 +127,11 @@ Remove-Module KeepitTools
 | `Disable-KeepitConnector`          | Disables a connector                                               |
 | `Submit-KeepitJob`                 | Submits backup/restore jobs with raw XML configuration             |
 | `Restore-KeepitBulkDeletedItems`   | Bulk restores deleted email items from Keepit backups              |
+| `Get-KeepitAuditLog`               | Retrieves audit log entries with optional date and area filtering  |
+| `Get-KeepitShare`                  | Lists all shared secure links for the authenticated user           |
+| `New-KeepitShare`                  | Creates a shared secure link with optional password and expiry     |
+| `Set-KeepitShare`                  | Updates properties of an existing shared secure link               |
+| `Remove-KeepitShare`              | Permanently deletes a shared secure link                           |
 
 ## General Examples
 
@@ -201,9 +207,31 @@ Get-KeepitConnector | Start-KeepitBackup
 # Start backup and view job details
 $job = Start-KeepitBackup -Connector "your-connector-guid"
 $job | Format-List JobGuid, Type, Status, Scheduled
+
+# Schedule a backup 30 minutes from now
+Start-KeepitBackup -Connector "your-connector-guid" -ScheduledTime (Get-Date).AddMinutes(30)
+
+# Schedule a backup for a specific date and time
+Start-KeepitBackup -Connector "Production M365" -ScheduledTime "2026-06-15T14:00:00"
 ```
 
 **Note:** If a backup job is already queued for a connector, `Start-KeepitBackup` will display a warning and return a status object with `Status = 'AlreadyQueued'` instead of creating a duplicate job.
+
+### Cancel Jobs
+
+```powershell
+# Cancel a specific job
+Stop-KeepitJob -Connector "your-connector-guid" -JobGuid "job-guid-here"
+
+# Cancel all active and scheduled jobs on a connector
+Stop-KeepitJob -Connector "Production M365" -All
+
+# Cancel active jobs via pipeline from Get-KeepitJobs
+Get-KeepitJobs -Connector "Production M365" -ActiveOnly | Stop-KeepitJob
+
+# Preview cancellations without actually cancelling
+Stop-KeepitJob -Connector "Production M365" -All -WhatIf
+```
 
 ### Full Pipeline Example
 
@@ -407,6 +435,60 @@ Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector 
 Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "your-connector-guid" -RootPath "Deleted Items" -StartTime (Get-Date).AddDays(-30) -EndTime (Get-Date) -WhatIf
 ```
 
+### View Audit Logs
+
+```powershell
+# Get the last 100 audit log entries (default)
+Get-KeepitAuditLog
+
+# Get up to 500 audit log entries
+Get-KeepitAuditLog -ResultSize 500
+
+# Get audit logs from the last 7 days
+Get-KeepitAuditLog -StartTime (Get-Date).AddDays(-7) -EndTime (Get-Date)
+
+# Get only backup/restore related audit entries
+Get-KeepitAuditLog -Area 'Backup/Restore' -ResultSize 50
+
+# Get audit logs and filter for specific actions
+Get-KeepitAuditLog -ResultSize 200 | Where-Object { $_.Message -like "*restore*" }
+```
+
+### Manage Shared Links
+
+```powershell
+# List all shared links
+Get-KeepitShare
+
+# Find password-protected shares
+Get-KeepitShare | Where-Object { $_.HasPassword -eq $true }
+
+# Create an unprotected share for a user's backup folder
+New-KeepitShare -Connector "Production M365" -Path "/user@example.com/"
+
+# Create a share with a 30-day expiry
+New-KeepitShare -Connector "Production M365" -Path "/user@example.com/" -Lifetime "P30D"
+
+# Create a password-protected share
+$pw = Read-Host -AsSecureString "Share password"
+New-KeepitShare -Connector "Production M365" -Path "/data/report.pdf" -Password $pw
+
+# Update a share's lifetime
+Set-KeepitShare -ShareId "abc123-def456" -Lifetime "P7D"
+
+# Remove password protection from a share
+Set-KeepitShare -ShareId "abc123-def456" -ClearPassword
+
+# Delete a specific share
+Remove-KeepitShare -ShareId "abc123-def456"
+
+# Delete all shares for a specific connector
+Get-KeepitShare | Where-Object ConnectorGuid -eq $guid | Remove-KeepitShare
+
+# Preview deletions without actually deleting
+Get-KeepitShare | Remove-KeepitShare -WhatIf
+```
+
 ## Searching snapshots
 
 The `Search-KeepitSnapshot` cmdlet allows you to search a set of snapshots looking for items that match your search criteria. This doesn't do a full-text content search, but it does allow you to quickly find deleted items, or to enumerate items in a snapshot. For example, if you want to know what mailboxes were backed up ins the most recent snapshot you can do this:
@@ -484,30 +566,24 @@ TotalItems JobCount ItemsBySnapshot
 ---------- -------- ---------------
          2        1 {[2026-01-13T16:49:10Z, 2]}
 ```
-The extra "WARNING" message is Search-KeepitSnapshot saying it didn't find anything at the original /OneDrive/ path; this is expected. In this case, the tool found 2 deleted files that were deleted within a single snapshot period, so they could be restored in a single job. To actually restore them, you'd run the same cmdlet again without the `-WhatIf` switch.
+The extra "WARNING" message is Search-KeepitSnapshot saying it didn't find anything at the original /OneDrive/ path; this is expected. In this case, the tool found 2 deleted files that were deleted within a single snapshot period, so they could be restored in a single job. To actually restore them, you'd run the same cmdlet again without the `-WhatIf` switch.         
 
-## Utility Scripts
 
-In addition to the module cmdlets, this repository contains standalone scripts for specific tasks.
+## Design principles
 
-### stop_start_stagger.ps1
+The code and artifacts in this project should be designed and built using the following principles.
 
-An enhanced version of the stop/start script that operates on a Target Account ID and allows for staggered start times to avoid overwhelming resources or hitting API limits.
+- This project uses the Keepit APIs described in the "api-endpoints.md" file.
+- This project will be structured as a [PowerShell script module](https://learn.microsoft.com/en-us/powershell/scripting/developer/module/how-to-write-a-powershell-script-module?view=powershell-7.5) that can be packaged and installed as a single unit.
+- It will contain multiple PowerShell [cmdlets](https://learn.microsoft.com/en-us/powershell/scripting/developer/cmdlet/cmdlet-overview?view=powershell-7.5).
+- The project code itself will be written in PowerShell, using only constructs and assemblies that can be loaded and run on Linux, macOS, and Windows.
+- Follow the [Microsoft required development guidelines for all PowerShell cmdlets](https://learn.microsoft.com/en-us/powershell/scripting/developer/cmdlet/required-development-guidelines?view=powershell-7.5).
+- Follow the [Microsoft recommended guidelines](https://learn.microsoft.com/en-us/powershell/scripting/developer/cmdlet/strongly-encouraged-development-guidelines?view=powershell-7.5) for all PowerShell cmdlets.
+- Follow the [Microsoft advisory guidelines](https://learn.microsoft.com/en-us/powershell/scripting/developer/cmdlet/advisory-development-guidelines?view=powershell-7.5) for all PowerShell cmdlets.
+- Require the use of a _Credential_ parameter (see advisory guideline AD03).
+- Use structured exception handling.
+- Include help for all cmdlets
 
-#### Features
+## implementation considerations
 
-- **Target Account Selection**: Prompts for a specific Account ID to operate on.
-- **Device Selection UI**: Provides a pop-up window (`Out-GridView`) to select which specific connectors/devices to process.
-- **High Performance**: Uses concurrent processing (20 threads) for both fetching device metadata and executing actions, significantly reducing execution time for large accounts.
-- **Staggered & Batched Starts**: Option to stagger backup job starts by batches (e.g., start 4 jobs every 30 minutes).
-- **Load Balancing (Mixing Logic)**: Automatically re-orders selected devices to mix largest and smallest connectors, ensuring a balanced workload during staggered starts.
-- **Robust Scheduling**: Includes a safety buffer and automatic retry logic with time-shifting to handle "400 Bad Request" errors caused by clock skew or past-timestamp issues.
-- **Enhanced Reporting**: Displays a final status table and automatically exports a detailed CSV report to your desktop.
-
-#### Usage
-
-```powershell
-.\stop_start_stagger.ps1
-```
-         
-
+- Because the Keepit API uses basic HTTP authentication, each API call must include an authentication header that contains the global "Auth" string created when Connect-KeepitService is run.
