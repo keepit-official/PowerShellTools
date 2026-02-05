@@ -8,33 +8,37 @@
     3. Retrieves all connectors with sizes and presents a selection UI.
     4. IF STOPPING:
        - Disables backup via Disable-KeepitConnector.
-       - Cancels any active/scheduled jobs (requires raw API — see NOTES).
+       - Cancels any active/scheduled jobs via Stop-KeepitJob.
     5. IF STARTING:
        - Enables backup via Enable-KeepitConnector.
        - Offers option to stagger backup jobs with load-balanced ordering.
-       - Starts backup jobs via Start-KeepitBackup or Submit-KeepitJob.
+       - Starts backup jobs via Start-KeepitBackup (immediate or scheduled).
+
+.PARAMETER Credential
+    Optional PSCredential object. If not supplied, the script will prompt interactively.
 
 .NOTES
-    Requires KeepitTools module v0.9.7+.
-
-    MISSING CMDLETS (workarounds in place):
-      - Stop-KeepitJob  : No cmdlet to cancel running/scheduled jobs.
-                           This script falls back to Submit-KeepitJob with cancel XML.
-      - Start-KeepitBackup -ScheduledTime : The cmdlet only supports immediate backups.
-                           Scheduled starts fall back to Submit-KeepitJob with raw XML.
+    Requires KeepitTools module v0.9.9+.
 #>
 
 #Requires -Modules KeepitTools
 #Requires -Modules Microsoft.PowerShell.ConsoleGuiTools
 #Requires -Version 7.0
 
+param(
+    [Parameter(Mandatory = $false)]
+    [PSCredential]$Credential
+)
+
 # --- Configuration ---
 $MaxRetries = 3
 $ValidEnvironments = @("us-dc", "de-fr", "dk-co", "ca-tr", "ch-zh", "au-sy", "uk-ld")
 
 # --- 1. Connect to Keepit ---
-Write-Host "Please enter your Keepit credentials..." -ForegroundColor Cyan
-$Creds = Get-Credential
+if (-not $Credential) {
+    Write-Host "Please enter your Keepit credentials..." -ForegroundColor Cyan
+    $Credential = Get-Credential
+}
 
 $AutoDiscover = Read-Host "`nDo you know which environment (data center) to connect to? (y/n)"
 
@@ -50,7 +54,7 @@ if ($AutoDiscover -eq 'y') {
 
     foreach ($dc in $ValidEnvironments) {
         try {
-            Connect-KeepitService -Credential $Creds -Environment $dc -ErrorAction Stop | Out-Null
+            Connect-KeepitService -Credential $Credential -Environment $dc -ErrorAction Stop | Out-Null
             $Environment = $dc
             Write-Host "  Found account in: $dc" -ForegroundColor Green
             break
@@ -68,7 +72,7 @@ if ($AutoDiscover -eq 'y') {
 # Connect (or confirm connection if auto-discovered)
 if ($AutoDiscover -eq 'y') {
     try {
-        Connect-KeepitService -Credential $Creds -Environment $Environment
+        Connect-KeepitService -Credential $Credential -Environment $Environment
         Write-Host "Connected to $Environment" -ForegroundColor Green
     } catch {
         Write-Error "Failed to connect: $($_.Exception.Message)"
@@ -90,7 +94,9 @@ Write-Host "`n--- Selected Mode: $ActionLabel ---" -ForegroundColor Magenta
 
 # --- 3. Get Connectors and Enrich with Size ---
 Write-Host "Fetching connectors..." -ForegroundColor Yellow
-$Connectors = Get-KeepitConnector -All
+
+# by default this fetches all connectors; you can add -Type if you want e.g. only M365 connectors
+$Connectors = Get-KeepitConnector 
 
 if (-not $Connectors -or $Connectors.Count -eq 0) {
     Write-Warning "No connectors found."
@@ -124,7 +130,7 @@ Write-Progress -Activity "Fetching sizes" -Completed
 
 # --- 4. Select Connectors ---
 $SelectedConnectors = $ConnectorData |
-    Out-ConsoleGridView -Title "Select Connectors to $Action" -PassThru
+    Out-ConsoleGridView -Title "Select Connectors to $Action"
 
 if (-not $SelectedConnectors) {
     Write-Warning "No connectors selected. Exiting."
@@ -184,21 +190,10 @@ for ($i = 0; $i -lt $Total; $i++) {
             # 1. Disable backup
             Disable-KeepitConnector -Connector $Conn.ConnectorGuid | Out-Null
 
-            # 2. Cancel active and scheduled jobs
-            #    NOTE: A Stop-KeepitJob cmdlet would replace this block.
-            $JobsToCancel = @()
-            try { $JobsToCancel += @(Get-KeepitJobs -Connector $Conn.ConnectorGuid -Active) } catch { }
-            try { $JobsToCancel += @(Get-KeepitJobs -Connector $Conn.ConnectorGuid -Scheduled) } catch { }
-            $JobsToCancel = $JobsToCancel | Where-Object { $_ }
-
-            foreach ($Job in $JobsToCancel) {
-                try {
-                    # WORKAROUND: Submit-KeepitJob POSTs new jobs — cancelling requires
-                    # a PUT on the existing job, which no cmdlet supports today.
-                    # A Stop-KeepitJob cmdlet is needed here. For now this is a no-op placeholder.
-                    Write-Warning "  Cannot cancel job $($Job.JobGuid) — Stop-KeepitJob cmdlet not available."
-                } catch { }
-            }
+            # 2. Cancel all active and scheduled jobs
+            try {
+                Stop-KeepitJob -Connector $Conn.ConnectorGuid -All | Out-Null
+            } catch { }
             $Scheduled = "Disabled"
 
         } else {
@@ -209,8 +204,6 @@ for ($i = 0; $i -lt $Total; $i++) {
 
             # 2. Start or schedule backup
             if ($StaggerInterval -gt 0) {
-                # Scheduled start — Start-KeepitBackup doesn't support -ScheduledTime,
-                # so we fall back to Submit-KeepitJob with raw XML.
                 $BatchIndex = [math]::Floor($i / $BatchSize)
                 $Offset = $BatchIndex * $StaggerInterval
                 $ScheduledTime = $BaseStartTime.AddMinutes($Offset)
@@ -220,19 +213,10 @@ for ($i = 0; $i -lt $Total; $i++) {
                 $CurrentTime = $ScheduledTime
 
                 while (-not $JobSuccess -and $RetryCount -lt $MaxRetries) {
-                    $TimeStr = $CurrentTime.ToString("yyyy-MM-ddTHH:mm:ssZ")
-                    $JobXml = @"
-<job>
-  <start>$TimeStr</start>
-  <description>User-requested backup</description>
-  <type>backup</type>
-  <commands><backup /></commands>
-</job>
-"@
                     try {
-                        Submit-KeepitJob -Connector $Conn.ConnectorGuid -Configuration $JobXml | Out-Null
+                        Start-KeepitBackup -Connector $Conn.ConnectorGuid -ScheduledTime $CurrentTime | Out-Null
                         $JobSuccess = $true
-                        $Scheduled = $TimeStr
+                        $Scheduled = $CurrentTime.ToString("yyyy-MM-ddTHH:mm:ssZ")
                     } catch {
                         $RetryCount++
                         if ($RetryCount -lt $MaxRetries) {
