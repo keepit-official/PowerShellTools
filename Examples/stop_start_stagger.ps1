@@ -17,6 +17,8 @@
        - Starts backup jobs with built-in retry logic and time-shifting for robustness.
 #>
 
+#Requires -Modules Microsoft.PowerShell.ConsoleGuiTools
+
 # --- Configuration ---
 $DataCenters = @("us-dc", "de-fr", "dk-co", "ca-tr", "ch-zh", "au-sy", "uk-ld", "ws-test")
 $MaxRetries = 3
@@ -205,7 +207,7 @@ try {
 
     # --- Device Selection Logic ---
     $SelectedDevices = $Devices | Select-Object name, guid, type, @{Name='size';Expression={$_.real_size}} | 
-        Out-GridView -Title "Select Connectors to $Action" -PassThru
+        Out-ConsoleGridView -Title "Select Connectors to $Action"
 
     if (-not $SelectedDevices) { Write-Warning "No connectors selected. Exiting."; exit }
 
