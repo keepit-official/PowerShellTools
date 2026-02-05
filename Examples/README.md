@@ -1,10 +1,12 @@
 # Examples
 
-This folder contains scripts that show practical usage of the Keepit PowerShell tools.
+This folder contains scripts that show practical usage of the Keepit PowerShell APIs and tools.
 
 ## Stop_Start_Stagger.ps1
 
 Interactively stops or starts backup jobs across Keepit connectors using direct API calls.
+
+**Note**: the v2 version of this script, which is marked as "experimental", uses the Keepit PowerShell tools module exclusively, but it doesn't correctly handle stopping some types of scheduled jobs.
 
 ### What it does
 

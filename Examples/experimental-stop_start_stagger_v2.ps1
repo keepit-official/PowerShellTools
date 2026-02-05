@@ -192,7 +192,7 @@ for ($i = 0; $i -lt $Total; $i++) {
 
             # 2. Cancel all active and scheduled jobs
             try {
-                Stop-KeepitJob -Connector $Conn.ConnectorGuid -All | Out-Null
+                Stop-KeepitJob -Connector $Conn.ConnectorGuid -All -verbose
             } catch { }
             $Scheduled = "Disabled"
 
