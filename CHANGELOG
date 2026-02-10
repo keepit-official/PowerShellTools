@@ -7,6 +7,11 @@
 - Stop-KeepitJob: Support pipeline input from Get-KeepitJobs
 - Stop-KeepitJob: Support -WhatIf and -Confirm
 - Start-KeepitBackup: Add -ScheduledTime parameter for scheduling future backups
+- Get-KeepitConnectorConfiguration: Add -Coverage parameter to return parsed backup scope per workload
+  - SharePoint: returns sites with auto-include, sub-site, and exclusion details
+  - Exchange: returns enabled categories and user selection rules
+  - OneDrive: returns options and user selection rules
+  - Teams: returns auto-include groups, enabled categories, and include/exclude group lists
 
 ## Version 0.9.8
 

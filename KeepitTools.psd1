@@ -125,6 +125,7 @@ Version 0.9.9
 - Stop-KeepitJob: Support pipeline input from Get-KeepitJobs
 - Stop-KeepitJob: Support -WhatIf and -Confirm
 - Start-KeepitBackup: Add -ScheduledTime parameter for scheduling future backups
+- Get-KeepitConnectorConfiguration: Add -Coverage parameter to return parsed backup scope per workload
 
 Version 0.9.8
 - Get-KeepitShare: New cmdlet to list all shared secure links for the authenticated user

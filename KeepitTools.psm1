@@ -455,6 +455,238 @@ function Test-GroupGuid {
 
 <#
 .SYNOPSIS
+    Extracts SharePoint coverage information from connector configuration
+.PARAMETER Config
+    The SharePointNG section of the connector configuration (hashtable)
+.PARAMETER FullConfig
+    The full connector configuration (hashtable), used for top-level properties
+.OUTPUTS
+    Array of PSCustomObjects describing SharePoint site coverage
+#>
+function Get-SharePointCoverage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Config,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$FullConfig
+    )
+
+    $results = @()
+
+    $autoInclude = if ($Config.ContainsKey('AutoIncludeAllSiteCollections')) {
+        $Config['AutoIncludeAllSiteCollections']
+    } else {
+        $false
+    }
+
+    if ($autoInclude) {
+        # When auto-include is on, report a summary entry with exclusions
+        $excludeSites = if ($Config.ContainsKey('ExcludeSiteCollections')) {
+            @($Config['ExcludeSiteCollections'])
+        } else {
+            @()
+        }
+        $excludePrefixes = if ($Config.ContainsKey('ExcludeSiteCollectionsWithPrefixes')) {
+            @($Config['ExcludeSiteCollectionsWithPrefixes'])
+        } else {
+            @()
+        }
+
+        $results += [PSCustomObject]@{
+            SiteUrl                  = '*'
+            AutoIncludeAllSubSites   = $true
+            SubSites                 = @()
+            ExcludeSubSites          = @()
+            ExcludeSiteCollections   = $excludeSites
+            ExcludeSiteCollectionsWithPrefixes = $excludePrefixes
+        }
+    }
+
+    # Include explicit site collections
+    if ($Config.ContainsKey('SiteCollections')) {
+        foreach ($site in $Config['SiteCollections']) {
+            $siteUrl = if ($site -is [hashtable] -and $site.ContainsKey('SiteUrl')) {
+                $site['SiteUrl']
+            } elseif ($site.PSObject -and $site.PSObject.Properties['SiteUrl']) {
+                $site.SiteUrl
+            } else {
+                $null
+            }
+
+            $autoSubSites = if ($site -is [hashtable] -and $site.ContainsKey('AutoIncludeAllSubSites')) {
+                $site['AutoIncludeAllSubSites']
+            } elseif ($site.PSObject -and $site.PSObject.Properties['AutoIncludeAllSubSites']) {
+                $site.AutoIncludeAllSubSites
+            } else {
+                $false
+            }
+
+            $subSites = if ($site -is [hashtable] -and $site.ContainsKey('SubSites')) {
+                @($site['SubSites'])
+            } elseif ($site.PSObject -and $site.PSObject.Properties['SubSites']) {
+                @($site.SubSites)
+            } else {
+                @()
+            }
+
+            $excludeSubSites = if ($site -is [hashtable] -and $site.ContainsKey('ExcludeSubSites')) {
+                @($site['ExcludeSubSites'])
+            } elseif ($site.PSObject -and $site.PSObject.Properties['ExcludeSubSites']) {
+                @($site.ExcludeSubSites)
+            } else {
+                @()
+            }
+
+            $results += [PSCustomObject]@{
+                SiteUrl                  = $siteUrl
+                AutoIncludeAllSubSites   = $autoSubSites
+                SubSites                 = $subSites
+                ExcludeSubSites          = $excludeSubSites
+                ExcludeSiteCollections   = $null
+                ExcludeSiteCollectionsWithPrefixes = $null
+            }
+        }
+    }
+
+    return , $results
+}
+
+<#
+.SYNOPSIS
+    Extracts Exchange coverage information from connector configuration
+.PARAMETER Config
+    The Exchange section of the connector configuration (hashtable)
+.PARAMETER FullConfig
+    The full connector configuration (hashtable), used for top-level UserSelectionRules
+.OUTPUTS
+    Array containing a single PSCustomObject describing Exchange coverage
+#>
+function Get-ExchangeCoverage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Config,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$FullConfig
+    )
+
+    $enabledCategories = if ($Config.ContainsKey('EnabledCategories')) {
+        @($Config['EnabledCategories'])
+    } else {
+        @()
+    }
+
+    $userSelectionRules = if ($FullConfig.ContainsKey('UserSelectionRules')) {
+        $FullConfig['UserSelectionRules']
+    } elseif ($Config.ContainsKey('UserSelectionRules')) {
+        $Config['UserSelectionRules']
+    } else {
+        $null
+    }
+
+    return , @([PSCustomObject]@{
+        EnabledCategories  = $enabledCategories
+        UserSelectionRules = $userSelectionRules
+    })
+}
+
+<#
+.SYNOPSIS
+    Extracts OneDrive coverage information from connector configuration
+.PARAMETER Config
+    The OneDriveSP section of the connector configuration (hashtable)
+.PARAMETER FullConfig
+    The full connector configuration (hashtable), used for top-level UserSelectionRules
+.OUTPUTS
+    Array containing a single PSCustomObject describing OneDrive coverage
+#>
+function Get-OneDriveCoverage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Config,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$FullConfig
+    )
+
+    $options = if ($Config.ContainsKey('Options')) {
+        $Config['Options']
+    } else {
+        $null
+    }
+
+    $userSelectionRules = if ($FullConfig.ContainsKey('UserSelectionRules')) {
+        $FullConfig['UserSelectionRules']
+    } elseif ($Config.ContainsKey('UserSelectionRules')) {
+        $Config['UserSelectionRules']
+    } else {
+        $null
+    }
+
+    return , @([PSCustomObject]@{
+        Options            = $options
+        UserSelectionRules = $userSelectionRules
+    })
+}
+
+<#
+.SYNOPSIS
+    Extracts Teams/UnifiedGroups coverage information from connector configuration
+.PARAMETER Config
+    The UnifiedGroups section of the connector configuration (hashtable)
+.PARAMETER FullConfig
+    The full connector configuration (hashtable)
+.OUTPUTS
+    Array containing a single PSCustomObject describing Teams/UnifiedGroups coverage
+#>
+function Get-UnifiedGroupsCoverage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Config,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$FullConfig
+    )
+
+    $autoInclude = if ($Config.ContainsKey('AutoIncludeGroups')) {
+        $Config['AutoIncludeGroups']
+    } else {
+        $false
+    }
+
+    $enabledCategories = if ($Config.ContainsKey('EnabledCategories')) {
+        @($Config['EnabledCategories'])
+    } else {
+        @()
+    }
+
+    $includeGroups = if ($Config.ContainsKey('IncludeGroups')) {
+        @($Config['IncludeGroups'])
+    } else {
+        @()
+    }
+
+    $excludeGroups = if ($Config.ContainsKey('ExcludeGroups')) {
+        @($Config['ExcludeGroups'])
+    } else {
+        @()
+    }
+
+    return , @([PSCustomObject]@{
+        AutoIncludeGroups = $autoInclude
+        EnabledCategories = $enabledCategories
+        IncludeGroups     = $includeGroups
+        ExcludeGroups     = $excludeGroups
+    })
+}
+
+<#
+.SYNOPSIS
     Resolves a connector identity (name or GUID) to a GUID
 .DESCRIPTION
     Takes a connector identity that can be either a connector name or a GUID,
@@ -4543,6 +4775,19 @@ function Convert-KeepitUPNToGuid {
     - powerbi: Not supported (single configuration block)
 
     An error is thrown if an invalid workload is specified for the connector type.
+.PARAMETER Coverage
+    Switch parameter that, when used with -Workload, returns parsed coverage information
+    describing the scope of what is being backed up for the specified workload. Returns
+    an array of PSCustomObjects with workload-specific properties.
+
+    Requires exactly one -Workload value. Different workloads return different shapes:
+    - SharePoint: Array of site objects with SiteUrl, AutoIncludeAllSubSites, SubSites,
+      ExcludeSubSites. When AutoIncludeAllSiteCollections is true, includes a summary
+      entry with SiteUrl='*' and exclusion lists.
+    - Exchange: Single-element array with EnabledCategories and UserSelectionRules.
+    - OneDrive: Single-element array with Options and UserSelectionRules.
+    - Teams: Single-element array with AutoIncludeGroups, EnabledCategories,
+      IncludeGroups, ExcludeGroups.
 .EXAMPLE
     Get-KeepitConnectorConfiguration -Connector "abc123-def456"
 
@@ -4589,6 +4834,18 @@ function Convert-KeepitUPNToGuid {
     Get-KeepitConnector -Type google | Get-KeepitConnectorConfiguration -Attributes "*"
 
     Gets all attributes for Google connectors (which don't support default RawConfiguration).
+.EXAMPLE
+    Get-KeepitConnectorConfiguration -Connector "Production M365" -Workload SharePoint -Coverage
+
+    Returns SharePoint coverage showing which sites are included/excluded from backup.
+.EXAMPLE
+    Get-KeepitConnectorConfiguration -Connector "Production M365" -Workload Exchange -Coverage
+
+    Returns Exchange coverage showing enabled categories and user selection rules.
+.EXAMPLE
+    Get-KeepitConnectorConfiguration -Connector "Production M365" -Workload Teams -Coverage
+
+    Returns Teams coverage showing auto-include groups setting and group include/exclude lists.
 .OUTPUTS
     PSCustomObject with properties:
         - ConnectorGuid: The connector GUID (lowercase)
@@ -4638,7 +4895,10 @@ function Get-KeepitConnectorConfiguration {
         [string[]]$Workload,
 
         [Parameter(Mandatory = $false)]
-        [switch]$Raw
+        [switch]$Raw,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Coverage
     )
 
     begin {
@@ -4693,6 +4953,16 @@ function Get-KeepitConnectorConfiguration {
             # Validate -Workload parameter against connector type
             if ($Workload) {
                 Test-WorkloadParameter -Workload $Workload -ConnectorType $connectorType
+            }
+
+            # Validate -Coverage parameter requirements
+            if ($Coverage) {
+                if (-not $Workload) {
+                    throw "The -Coverage parameter requires -Workload to be specified."
+                }
+                if ($Workload.Count -gt 1) {
+                    throw "The -Coverage parameter requires exactly one workload. Specify a single -Workload value."
+                }
             }
 
             # If -Attributes is not specified, require supported connector type
@@ -4855,6 +5125,30 @@ function Get-KeepitConnectorConfiguration {
                 Write-Verbose "Parsing configuration JSON and filtering by workloads: $($Workload -join ', ')"
                 try {
                     $fullConfig = $configXml | ConvertFrom-Json -AsHashtable
+
+                    # If -Coverage is specified, dispatch to appropriate coverage helper
+                    if ($Coverage) {
+                        $w = $Workload[0]
+                        $jsonKey = $script:WorkloadToJsonKey[$w]
+                        if (-not $fullConfig.ContainsKey($jsonKey)) {
+                            Write-Warning "Workload '$w' (JSON key: $jsonKey) not found in configuration"
+                            return , @()
+                        }
+                        $workloadConfig = $fullConfig[$jsonKey]
+
+                        $coverageResult = switch ($jsonKey) {
+                            'SharePointNG'  { Get-SharePointCoverage -Config $workloadConfig -FullConfig $fullConfig }
+                            'Exchange'      { Get-ExchangeCoverage -Config $workloadConfig -FullConfig $fullConfig }
+                            'OneDriveSP'    { Get-OneDriveCoverage -Config $workloadConfig -FullConfig $fullConfig }
+                            'UnifiedGroups' { Get-UnifiedGroupsCoverage -Config $workloadConfig -FullConfig $fullConfig }
+                            default {
+                                Write-Warning "Coverage is not supported for workload '$w'"
+                                , @()
+                            }
+                        }
+                        return $coverageResult
+                    }
+
                     $filteredConfig = @{}
 
                     foreach ($w in $Workload) {

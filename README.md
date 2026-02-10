@@ -114,7 +114,7 @@ Remove-Module KeepitTools
 | `Connect-KeepitService`            | Establishes authenticated connection to Keepit platform            |
 | `Disconnect-KeepitService`         | Closes connection and clears cached credentials                    |
 | `Get-KeepitConnector`              | Retrieves accessible connectors, optionally filtered by type       |
-| `Get-KeepitConnectorConfiguration` | Retrieves connector configuration with optional workload filtering |
+| `Get-KeepitConnectorConfiguration` | Retrieves connector configuration, workload filtering, and coverage|
 | `Set-KeepitConnectorConfiguration` | Updates connector configuration to add/remove objects or attributes|
 | `New-KeepitConnector`              | Creates a new Keepit connector with specified type and config      |
 | `Get-KeepitSnapshot`               | Retrieves snapshot information (latest, range, or count)           |
@@ -283,6 +283,17 @@ Get-KeepitConnectorConfiguration -Connector "your-connector-guid" -Attributes "*
 # Get specific attributes
 Get-KeepitConnectorConfiguration -Connector "Production M365" -Attributes "ng_backup_config"
 
+# Get SharePoint coverage (which sites are included/excluded)
+Get-KeepitConnectorConfiguration -Connector "Production M365" -Workload SharePoint -Coverage
+
+# Get Exchange coverage (enabled categories and user selection rules)
+Get-KeepitConnectorConfiguration -Connector "Production M365" -Workload Exchange -Coverage
+
+# Get Teams coverage (auto-include groups, include/exclude lists)
+Get-KeepitConnectorConfiguration -Connector "Production M365" -Workload Teams -Coverage
+
+# Get OneDrive coverage (options and user selection rules)
+Get-KeepitConnectorConfiguration -Connector "Production M365" -Workload OneDrive -Coverage
 ```
 
 #### Workload Parameter
