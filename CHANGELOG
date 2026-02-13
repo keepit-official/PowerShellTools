@@ -1,5 +1,10 @@
 # KeepitTools Changelog
 
+## Version 1.0.0
+- Fixed Convert-KeepitUPNtoGUID to properly escape dashes; Keepit GUIDs are separated by two dashes and this was making path conversion work inconsistently
+- Reorganized "Examples" folder
+- Added new example script, New-BulkShareLinks.ps1. See Examples/BulkLinks/README.md for usage instructions.
+
 ## Version 0.9.9
 
 - Stop-KeepitJob: New cmdlet to cancel running, scheduled, and queued jobs
