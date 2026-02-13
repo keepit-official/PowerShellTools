@@ -4568,7 +4568,8 @@ function ConvertTo-MaskedPath {
         }
 
         # Order matters: escape - first (to --), then : (to -c), then internal / (to -s)
-        $masked = $segment -replace '-', '--'
+        # Use lookaround to skip dashes that are already doubled
+        $masked = $segment -replace '(?<!-)-(?!-)', '--'
         $masked = $masked -replace ':', '-c'
         # Note: / within segment names (like URLs) need to be escaped to -s
         # But since we split on /, segments shouldn't contain / unless it's part of a URL
@@ -4717,6 +4718,10 @@ function Convert-KeepitUPNToGuid {
                 Write-Warning "No GUID found for UPN '$UserPrincipalName' in connector '$connectorGuid'"
                 return $null
             }
+
+            # Escape single dashes to double dashes for Keepit path format
+            $guid = $guid -replace '(?<!-)-(?!-)', '--'
+            Write-Verbose "Path-escaped GUID: $guid"
 
             # Return result object
             [PSCustomObject]@{
@@ -7273,16 +7278,12 @@ function Get-KeepitShare {
     SecureString password to protect the share. Recipients will need to provide this password
     to access the shared content.
 .EXAMPLE
-    New-KeepitShare -Connector "Production M365" -Path "/user@example.com/"
+     New-KeepitShare -Connector "ExO Only" -Path "/Users/pro@keepit.com/Outlook/" -Lifetime "P30D"
 
-    Creates an unprotected share of the user's folder hierarchy using the latest snapshot
-.EXAMPLE
-    Get-KeepitConnector -Name "Exchange" | New-KeepitShare -Path "/user@example.com/" -Lifetime "P30D"
-
-    Creates a share that expires in 30 days via pipeline
+    Creates an unprotected share of the user's folder hierarchy using the latest snapshot, expiring in 30 days.
 .EXAMPLE
     $pw = Read-Host -AsSecureString "Share password"
-    New-KeepitShare -Connector "abc123-def456-ghi789" -Path "/data/report.pdf" -Password $pw
+    New-KeepitShare -Connector "abc123-def456-ghi789" -Path "/Users/pro@keepit.com/OneDrive/data/report.pdf" -Password $pw
 
     Creates a password-protected share for a single file
 .OUTPUTS
@@ -7341,6 +7342,11 @@ function New-KeepitShare {
             $connectorGuid = $resolved.ConnectorGuid
             Write-Verbose "=== New-KeepitShare: Processing Connector ==="
             Write-Verbose "Connector: $($resolved.Name) ($connectorGuid)"
+
+            # Ensure trailing slash (directory share)
+            if (-not $Path.EndsWith('/')) {
+                $Path = $Path + '/'
+            }
 
             # XML-escape the path
             $escapedPath = [System.Security.SecurityElement]::Escape($Path)
@@ -7427,7 +7433,14 @@ function New-KeepitShare {
 
             if ($locationHeader) {
                 Write-Verbose "Location header: $locationHeader"
-                $shareUrl = $locationHeader
+
+                # Build full URL: if the Location header is a relative path, prepend the base URL
+                if ($locationHeader -match '^https?://') {
+                    $shareUrl = $locationHeader
+                }
+                else {
+                    $shareUrl = $baseUrl + $locationHeader
+                }
 
                 # Extract GUID from Location URL (e.g., /share/{guid}/ or https://host/share/{guid}/)
                 if ($locationHeader -match '/share/([0-9a-fA-F-]+)') {
