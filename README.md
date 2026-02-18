@@ -132,6 +132,10 @@ Remove-Module KeepitTools
 | `New-KeepitShare`                  | Creates a shared secure link with optional password and expiry     |
 | `Set-KeepitShare`                  | Updates properties of an existing shared secure link               |
 | `Remove-KeepitShare`              | Permanently deletes a shared secure link                           |
+| `Get-KeepitUser`                  | Lists all user accounts on the Keepit platform                     |
+| `New-KeepitUser`                  | Creates a new Keepit user account with role and connector access   |
+| `Remove-KeepitUser`              | Removes a Keepit user account                                      |
+| `Get-KeepitRoles`                | Lists available roles and their capabilities                       |
 
 ## General Examples
 
@@ -500,6 +504,40 @@ Get-KeepitShare | Where-Object ConnectorGuid -eq $guid | Remove-KeepitShare
 Get-KeepitShare | Remove-KeepitShare -WhatIf
 ```
 
+### Manage Users
+
+```powershell
+# List all users
+Get-KeepitUser
+
+# List users in a table
+Get-KeepitUser | Format-Table UserName, Acl, PrimaryToken
+
+# List available roles and their capabilities
+Get-KeepitRoles
+
+# Show capabilities for a specific role
+Get-KeepitRoles | Where-Object Name -eq 'BackupAdmin' | Select-Object -ExpandProperty Capabilities
+
+# Create a new user with BackupAdmin role and access to all connectors
+New-KeepitUser -Name "Jane Doe" -Email "jane@example.com" -Role BackupAdmin -Connectors all
+
+# Create a user with access to specific connectors only
+New-KeepitUser -Name "John Smith" -Email "john@example.com" -Role StandardSupport -Connectors "Production M365", "Entra ID"
+
+# Create a user and send an activation email
+New-KeepitUser -Name "New Admin" -Email "newadmin@example.com" -Role MasterAdmin -Connectors all -SendActivationEmail
+
+# Remove a user (prompts for confirmation)
+Remove-KeepitUser -Identity "jane@example.com"
+
+# Remove a user without confirmation prompt
+Remove-KeepitUser -Identity "jane@example.com" -Confirm:$false
+
+# Preview removal without actually removing
+Remove-KeepitUser -Identity "jane@example.com" -WhatIf
+```
+
 ## Searching snapshots
 
 The `Search-KeepitSnapshot` cmdlet allows you to search a set of snapshots looking for items that match your search criteria. This doesn't do a full-text content search, but it does allow you to quickly find deleted items, or to enumerate items in a snapshot. For example, if you want to know what mailboxes were backed up ins the most recent snapshot you can do this:
@@ -580,21 +618,3 @@ TotalItems JobCount ItemsBySnapshot
 The extra "WARNING" message is Search-KeepitSnapshot saying it didn't find anything at the original /OneDrive/ path; this is expected. In this case, the tool found 2 deleted files that were deleted within a single snapshot period, so they could be restored in a single job. To actually restore them, you'd run the same cmdlet again without the `-WhatIf` switch.         
 
 
-## Design principles
-
-The code and artifacts in this project should be designed and built using the following principles.
-
-- This project uses the Keepit APIs described in the "api-endpoints.md" file.
-- This project will be structured as a [PowerShell script module](https://learn.microsoft.com/en-us/powershell/scripting/developer/module/how-to-write-a-powershell-script-module?view=powershell-7.5) that can be packaged and installed as a single unit.
-- It will contain multiple PowerShell [cmdlets](https://learn.microsoft.com/en-us/powershell/scripting/developer/cmdlet/cmdlet-overview?view=powershell-7.5).
-- The project code itself will be written in PowerShell, using only constructs and assemblies that can be loaded and run on Linux, macOS, and Windows.
-- Follow the [Microsoft required development guidelines for all PowerShell cmdlets](https://learn.microsoft.com/en-us/powershell/scripting/developer/cmdlet/required-development-guidelines?view=powershell-7.5).
-- Follow the [Microsoft recommended guidelines](https://learn.microsoft.com/en-us/powershell/scripting/developer/cmdlet/strongly-encouraged-development-guidelines?view=powershell-7.5) for all PowerShell cmdlets.
-- Follow the [Microsoft advisory guidelines](https://learn.microsoft.com/en-us/powershell/scripting/developer/cmdlet/advisory-development-guidelines?view=powershell-7.5) for all PowerShell cmdlets.
-- Require the use of a _Credential_ parameter (see advisory guideline AD03).
-- Use structured exception handling.
-- Include help for all cmdlets
-
-## implementation considerations
-
-- Because the Keepit API uses basic HTTP authentication, each API call must include an authentication header that contains the global "Auth" string created when Connect-KeepitService is run.

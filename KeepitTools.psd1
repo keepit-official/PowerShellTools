@@ -3,7 +3,7 @@
     RootModule = 'KeepitTools.psm1'
 
     # Version number of this module
-    ModuleVersion = '1.0.0'
+    ModuleVersion = '1.1.0'
 
     # Supported PSEditions
     CompatiblePSEditions = @('Core')
@@ -80,6 +80,10 @@
         'Get-KeepitAuditLog',
         'Get-KeepitShare',
         'New-KeepitShare',
+        'New-KeepitUser',
+        'Get-KeepitUser',
+        'Get-KeepitRoles',
+        'Remove-KeepitUser',
         'Set-KeepitShare',
         'Remove-KeepitShare'
     )
@@ -119,6 +123,22 @@
 
             # ReleaseNotes of this module
             ReleaseNotes = @'
+Version 1.1.0
+- New-KeepitUser: New cmdlet to create Keepit user accounts with role assignment and connector access
+- New-KeepitUser: Support -Connectors parameter with "all" shorthand or specific connector names/GUIDs
+- New-KeepitUser: Support -SendActivationEmail and -NotificationsEnabled switches
+- Remove-KeepitUser: New cmdlet to remove Keepit user accounts
+- Remove-KeepitUser: Support -WhatIf and -Confirm with ConfirmImpact High
+- Get-KeepitUser: New cmdlet to list all user accounts on the platform
+- Get-KeepitRoles: New cmdlet to list available roles and their capabilities
+- Refactor module from monolithic .psm1 into dot-sourced script files (Private/ and Public/ directories)
+
+Version 1.0.0
+- New-KeepitShare: Prepend base URL to relative Location headers so ShareUrl returns a full URL
+- New-KeepitShare: Append trailing slash to paths that lack one (directory share)
+- Convert-KeepitUPNToGuid: Escape GUIDs with double dashes for Keepit path format
+- ConvertTo-MaskedPath: Make dash escaping idempotent so pre-escaped GUIDs are not re-doubled
+
 Version 0.9.9
 - Stop-KeepitJob: New cmdlet to cancel running, scheduled, and queued jobs
 - Stop-KeepitJob: Support -All switch to cancel every active/scheduled job on a connector
