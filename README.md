@@ -538,6 +538,28 @@ Remove-KeepitUser -Identity "jane@example.com" -Confirm:$false
 Remove-KeepitUser -Identity "jane@example.com" -WhatIf
 ```
 
+## Example Scripts
+
+The `Examples/` directory contains standalone PowerShell scripts that demonstrate common workflows using the KeepitTools module.
+
+### GroupSync — Copy-EntraGroupToKeepit.ps1
+
+Connects to Microsoft Entra ID, expands the transitive membership of a security or distribution group (including nested groups), and creates each member as a Keepit user with a specified role and connector access. Supports `-WhatIf` to preview changes without creating any users.
+
+```powershell
+# Create all members of an Entra group as BackupAdmins with access to all connectors
+$kCred = Get-Credential
+.\Examples\GroupSync\Copy-EntraGroupToKeepit.ps1 `
+    -GroupName "Keepit Admins" `
+    -KeepitCredential $kCred `
+    -Environment "us-dc" `
+    -Connectors "all" `
+    -Role "BackupAdmin" `
+    -SendActivationEmail
+```
+
+See `Examples/GroupSync/README.md` for full parameter reference and examples.
+
 ## Searching snapshots
 
 The `Search-KeepitSnapshot` cmdlet allows you to search a set of snapshots looking for items that match your search criteria. This doesn't do a full-text content search, but it does allow you to quickly find deleted items, or to enumerate items in a snapshot. For example, if you want to know what mailboxes were backed up ins the most recent snapshot you can do this:

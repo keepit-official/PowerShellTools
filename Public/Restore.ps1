@@ -1003,3 +1003,143 @@ function Convert-KeepitUPNToGuid {
     }
 }
 
+<#
+.SYNOPSIS
+    Converts a Keepit backup GUID to a User Principal Name (UPN)
+.DESCRIPTION
+    Resolves one or more Keepit path-masked GUIDs (as found in backup paths such as
+    /Users/{guid}/Outlook) back to the corresponding User Principal Names. The function
+    performs two BSearch calls in the begin block – one for active users and one for
+    deleted users – and builds an in-memory lookup table that is reused for every GUID
+    in the pipeline. This makes it efficient for bulk resolution.
+
+    The GUID may be provided in either path-masked form (double dashes, as returned by
+    Search-KeepitSnapshot or EverCovered.ps1) or in standard UUID form (single dashes).
+    Both are accepted and normalised automatically.
+.PARAMETER Guid
+    The Keepit backup GUID to resolve. Accepts path-masked GUIDs
+    (e.g. bf06910a--a25b--42ef--b656--260b4592db40) or standard UUID format.
+    Accepts pipeline input directly or by property name.
+    Aliases: UserGUID, Id
+.PARAMETER Connector
+    The name or GUID of the Keepit connector to resolve against.
+    Aliases: ConnectorGuid, Name
+.EXAMPLE
+    Convert-KeepitGuidToUPN -Guid "bf06910a--a25b--42ef--b656--260b4592db40" -Connector "Production M365"
+
+    Resolves a single GUID to its UPN.
+.EXAMPLE
+    $guids | Convert-KeepitGuidToUPN -Connector "Production M365"
+
+    Resolves multiple GUIDs via the pipeline using only two BSearch API calls.
+.EXAMPLE
+    Import-Csv covered.csv | Select-Object -ExpandProperty UserGUID |
+        Convert-KeepitGuidToUPN -Connector "abc123-def456"
+
+    Resolves all GUIDs from an EverCovered report.
+.OUTPUTS
+    PSCustomObject with properties:
+        - Guid              : The input GUID (preserved as supplied)
+        - UserPrincipalName : The resolved UPN, or $null if not found
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+    The lookup is performed against the /Users path on the specified connector.
+    Only two BSearch calls are made per cmdlet invocation, regardless of the number
+    of GUIDs processed.
+#>
+function Convert-KeepitGuidToUPN {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0,
+            ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('UserGUID', 'Id')]
+        [string]$Guid,
+
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('ConnectorGuid', 'Name')]
+        [string]$Connector
+    )
+
+    begin {
+        Write-Verbose "Convert-KeepitGuidToUPN: Initializing"
+
+        # Resolve connector identity and build the GUID -> UPN lookup table.
+        # Two BSearch calls cover active users and users previously removed from backup.
+        $guidToUpnMap = [System.Collections.Generic.Dictionary[string, string]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase
+        )
+
+        try {
+            $resolved     = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $connectorGuid = $resolved.ConnectorGuid
+            Write-Verbose "Connector: $($resolved.Name) ($connectorGuid)"
+        }
+        catch {
+            throw "Failed to resolve connector '$Connector': $($_.Exception.Message)"
+        }
+
+        # Active users
+        try {
+            $activeUsers = @(
+                Search-KeepitSnapshot -Connector $connectorGuid `
+                    -RootPath '/Users' `
+                    -ResultSize Unlimited `
+                    -WarningAction SilentlyContinue `
+                    -ErrorAction Stop
+            )
+            foreach ($u in $activeUsers) {
+                if (-not [string]::IsNullOrWhiteSpace($u.Name)) {
+                    $guidToUpnMap[$u.Name] = $u.Title
+                }
+            }
+            Write-Verbose "Loaded $($activeUsers.Count) active user entry/entries"
+        }
+        catch {
+            Write-Warning "Could not fetch active user list: $($_.Exception.Message)"
+        }
+
+        # Deleted users (previously backed up, since removed from connector)
+        try {
+            $deletedUsers = @(
+                Search-KeepitSnapshot -Connector $connectorGuid `
+                    -RootPath '/Users' `
+                    -DeletedOnly `
+                    -ResultSize Unlimited `
+                    -WarningAction SilentlyContinue `
+                    -ErrorAction Stop
+            )
+            foreach ($u in $deletedUsers) {
+                if (-not [string]::IsNullOrWhiteSpace($u.Name) -and
+                    -not $guidToUpnMap.ContainsKey($u.Name)) {
+                    $guidToUpnMap[$u.Name] = $u.Title
+                }
+            }
+            Write-Verbose "Loaded $($deletedUsers.Count) deleted user entry/entries"
+        }
+        catch {
+            Write-Warning "Could not fetch deleted user list (skipping): $($_.Exception.Message)"
+        }
+
+        Write-Verbose "GUID lookup table contains $($guidToUpnMap.Count) entry/entries"
+    }
+
+    process {
+        # Normalise: convert path-masked double-dashes back to single dashes for lookup
+        $rawGuid = $Guid -replace '--', '-'
+
+        $upn = $null
+        if (-not $guidToUpnMap.TryGetValue($rawGuid, [ref]$upn)) {
+            Write-Verbose "No UPN found for GUID '$Guid'"
+        }
+        else {
+            Write-Verbose "Resolved '$rawGuid' -> '$upn'"
+        }
+
+        [PSCustomObject]@{
+            Guid              = $Guid
+            UserPrincipalName = $upn
+        }
+    }
+}

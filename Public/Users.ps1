@@ -114,9 +114,11 @@ function New-KeepitUser {
 
         Write-Verbose "Available roles: $($availableRoles -join ', ')"
 
-        if ($Role -notin $availableRoles) {
+        $canonicalRole = $availableRoles | Where-Object { $_ -ieq $Role } | Select-Object -First 1
+        if (-not $canonicalRole) {
             throw "Invalid role '$Role'. Available roles: $($availableRoles -join ', ')"
         }
+        $Role = $canonicalRole
 
         # Step 3: Generate 16-character random password
         $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^*'
@@ -137,11 +139,13 @@ function New-KeepitUser {
         Write-Verbose "Request body: $tokenXml"
 
         $createResponse = Invoke-WebRequest -Uri $createUri -Method Post -Headers $headers -Body $tokenXml -SkipHttpErrorCheck
+        Write-Verbose "Create token response: HTTP $($createResponse.StatusCode)"
         if ($createResponse.StatusCode -eq 409) {
             throw "User '$Email' already exists."
         }
         elseif ($createResponse.StatusCode -ge 400) {
-            throw "Failed to create user token: HTTP $($createResponse.StatusCode) $($createResponse.StatusDescription)"
+            Write-Verbose "Response body: $($createResponse.Content)"
+            throw "Failed to create user token: HTTP $($createResponse.StatusCode) $($createResponse.StatusDescription) - $($createResponse.Content)"
         }
 
         Write-Verbose "User token created successfully"

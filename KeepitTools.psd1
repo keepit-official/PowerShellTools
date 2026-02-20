@@ -3,7 +3,7 @@
     RootModule = 'KeepitTools.psm1'
 
     # Version number of this module
-    ModuleVersion = '1.1.0'
+    ModuleVersion = '1.2.0'
 
     # Supported PSEditions
     CompatiblePSEditions = @('Core')
@@ -72,6 +72,7 @@
         'Start-KeepitBackup',
         'Search-KeepitSnapshot',
         'Convert-KeepitUPNToGuid',
+        'Convert-KeepitGuidToUPN',
         'Enable-KeepitConnector',
         'Disable-KeepitConnector',
         'Submit-KeepitJob',
@@ -123,6 +124,12 @@
 
             # ReleaseNotes of this module
             ReleaseNotes = @'
+Version 1.2.0
+- Convert-KeepitGuidToUPN: New cmdlet to resolve Keepit backup GUIDs to User Principal Names
+- Convert-KeepitGuidToUPN: Accepts path-masked (double-dash) or standard UUID GUID format
+- Convert-KeepitGuidToUPN: Pipeline-efficient: two BSearch calls for any number of GUIDs
+- Convert-KeepitGuidToUPN: Covers active and previously-removed (deleted) users
+
 Version 1.1.0
 - New-KeepitUser: New cmdlet to create Keepit user accounts with role assignment and connector access
 - New-KeepitUser: Support -Connectors parameter with "all" shorthand or specific connector names/GUIDs

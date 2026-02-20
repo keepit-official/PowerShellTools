@@ -1,5 +1,16 @@
 # KeepitTools Changelog
 
+## Version 1.2.0
+
+- Convert-KeepitGuidToUPN: New cmdlet to resolve Keepit backup GUIDs to User Principal Names
+- Convert-KeepitGuidToUPN: Accepts path-masked (double-dash) or standard UUID GUID format
+- Convert-KeepitGuidToUPN: Pipeline-efficient: two BSearch calls for any number of GUIDs
+- Convert-KeepitGuidToUPN: Covers active and previously-removed (deleted) users
+
+## Version 1.1.1
+
+- New-KeepitUser: Normalize role name to canonical casing from the API before building the XML request body; the Keepit API is case-sensitive for role names and returns HTTP 500 for mis-cased values (e.g. `limitedSupport` instead of `LimitedSupport`)
+
 ## Version 1.1.0
 
 - New-KeepitUser: New cmdlet to create Keepit user accounts with role assignment and connector access
@@ -17,6 +28,7 @@
 - New-KeepitShare: Append trailing slash to paths that lack one (directory share)
 - Convert-KeepitUPNToGuid: Escape GUIDs with double dashes for Keepit path format
 - ConvertTo-MaskedPath: Make dash escaping idempotent so pre-escaped GUIDs are not re-doubled
+
 ## Version 0.9.9
 
 - Stop-KeepitJob: New cmdlet to cancel running, scheduled, and queued jobs
