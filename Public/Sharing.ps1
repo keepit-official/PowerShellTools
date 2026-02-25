@@ -29,6 +29,7 @@
 #>
 function Get-KeepitShare {
     [CmdletBinding()]
+    [OutputType([PSCustomObject])]
     param()
 
     try {
@@ -92,7 +93,14 @@ function Get-KeepitShare {
         Write-Verbose "=== End Get-KeepitShare ==="
     }
     catch {
-        throw "Failed to retrieve shares: $($_.Exception.Message)"
+        $PSCmdlet.ThrowTerminatingError(
+            [System.Management.Automation.ErrorRecord]::new(
+                [System.Exception]::new("Failed to retrieve shares: $($_.Exception.Message)", $_.Exception),
+                'KeepitApiError',
+                [System.Management.Automation.ErrorCategory]::ConnectionError,
+                $null
+            )
+        )
     }
 }
 
@@ -137,7 +145,8 @@ function Get-KeepitShare {
     Path rules: must start with /, directories end with /, files end with filename.
 #>
 function New-KeepitShare {
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
         [ValidateNotNullOrEmpty()]
@@ -149,7 +158,7 @@ function New-KeepitShare {
         [string]$Path,
 
         [Parameter(Mandatory = $false)]
-        [ValidatePattern('^P(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(\d+H)?(\d+M)?(\d+S)?)?$')]
+        [ValidatePattern('^P(?=\d|T\d)(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(\d+H)?(\d+M)?(\d+S)?)?$')]
         [string]$Lifetime,
 
         [Parameter(Mandatory = $false)]
@@ -170,7 +179,7 @@ function New-KeepitShare {
             Write-Verbose "Initialization completed successfully"
         }
         catch {
-            throw "Failed to initialize: $($_.Exception.Message)"
+            throw
         }
     }
 
@@ -211,12 +220,13 @@ function New-KeepitShare {
             }
 
             $xmlBody += "</share>"
+            $plainPassword = $null
 
             Write-Verbose "=== API Request Details ==="
             Write-Verbose "Method: POST"
             Write-Verbose "URI: $baseUrl/share/"
             Write-Verbose "Content-Type: application/xml"
-            Write-Verbose "Request Body:`n$xmlBody"
+            Write-Verbose "Request Body:`n$($xmlBody -replace '<password>[^<]*</password>', '<password>***</password>')"
 
             # Build request
             $uri = "$baseUrl/share/"
@@ -227,84 +237,93 @@ function New-KeepitShare {
 
             Write-Verbose "=== Sending API Request ==="
 
-            # Use Invoke-WebRequest to capture Location header
-            $webResponse = Invoke-WebRequest -Uri $uri -Method Post -Headers $headers -Body $xmlBody -SkipHttpErrorCheck
+            if ($PSCmdlet.ShouldProcess("$Path on connector $connectorGuid", 'Create share')) {
+                # Use Invoke-WebRequest to capture Location header
+                $webResponse = Invoke-WebRequest -Uri $uri -Method Post -Headers $headers -Body $xmlBody -SkipHttpErrorCheck -ErrorAction Stop
 
-            Write-Verbose "=== API Response Received ==="
-            Write-Verbose "Status Code: $($webResponse.StatusCode)"
+                Write-Verbose "=== API Response Received ==="
+                Write-Verbose "Status Code: $($webResponse.StatusCode)"
 
-            # Check for HTTP errors
-            if ($webResponse.StatusCode -ge 400) {
-                $errorBody = $webResponse.Content
-                Write-Verbose "Error response body: $errorBody"
+                # Check for HTTP errors
+                if ($webResponse.StatusCode -ge 400) {
+                    $errorBody = $webResponse.Content
+                    Write-Verbose "Error response body: $errorBody"
 
-                $apiError = $null
-                if ($errorBody) {
-                    try {
-                        $errorXml = [xml]$errorBody
-                        $apiError = [PSCustomObject]@{
-                            Code        = $errorXml.error.code
-                            Description = $errorXml.error.description
+                    $apiError = $null
+                    if ($errorBody) {
+                        try {
+                            $errorXml = [xml]$errorBody
+                            $apiError = [PSCustomObject]@{
+                                Code        = $errorXml.error.code
+                                Description = $errorXml.error.description
+                            }
+                            Write-Verbose "Parsed API Error - Code: $($apiError.Code), Description: $($apiError.Description)"
                         }
-                        Write-Verbose "Parsed API Error - Code: $($apiError.Code), Description: $($apiError.Description)"
+                        catch {
+                            Write-Verbose "Could not parse error response as XML: $($_.Exception.Message)"
+                        }
                     }
-                    catch {
-                        Write-Verbose "Could not parse error response as XML: $($_.Exception.Message)"
+
+                    if ($apiError -and $apiError.Code) {
+                        throw "Failed to create share: [$($apiError.Code)] $($apiError.Description)"
+                    }
+                    else {
+                        throw "Failed to create share: HTTP $($webResponse.StatusCode) - $errorBody"
                     }
                 }
 
-                if ($apiError -and $apiError.Code) {
-                    throw "Failed to create share: [$($apiError.Code)] $($apiError.Description)"
+                # Extract share GUID from Location header
+                $shareId = $null
+                $shareUrl = $null
+                $locationHeader = $null
+                if ($webResponse.Headers -and $webResponse.Headers.ContainsKey('Location')) {
+                    $locationValue = $webResponse.Headers['Location']
+                    $locationHeader = if ($locationValue -is [System.Array]) { $locationValue[0] } else { $locationValue }
                 }
-                else {
-                    throw "Failed to create share: HTTP $($webResponse.StatusCode) - $errorBody"
+
+                if ($locationHeader) {
+                    Write-Verbose "Location header: $locationHeader"
+
+                    # Build full URL: if the Location header is a relative path, prepend the base URL
+                    if ($locationHeader -match '^https?://') {
+                        $shareUrl = $locationHeader
+                    }
+                    else {
+                        $shareUrl = $baseUrl + $locationHeader
+                    }
+
+                    # Extract GUID from Location URL (e.g., /share/{guid}/ or https://host/share/{guid}/)
+                    if ($locationHeader -match '/share/([0-9a-fA-F-]+)') {
+                        $shareId = $Matches[1]
+                        Write-Verbose "Extracted share GUID from Location header: $shareId"
+                    }
                 }
+
+                # Build and return result object
+                [PSCustomObject]@{
+                    ShareId       = $shareId
+                    ShareUrl      = $shareUrl
+                    ConnectorGuid = $connectorGuid
+                    Path          = $Path
+                    Lifetime      = if ($PSBoundParameters.ContainsKey('Lifetime')) { $Lifetime } else { $null }
+                }
+
+                Write-Verbose "=== Share Created Successfully ==="
             }
-
-            # Extract share GUID from Location header
-            $shareId = $null
-            $shareUrl = $null
-            $locationHeader = $null
-            if ($webResponse.Headers -and $webResponse.Headers.ContainsKey('Location')) {
-                $locationValue = $webResponse.Headers['Location']
-                $locationHeader = if ($locationValue -is [System.Array]) { $locationValue[0] } else { $locationValue }
-            }
-
-            if ($locationHeader) {
-                Write-Verbose "Location header: $locationHeader"
-
-                # Build full URL: if the Location header is a relative path, prepend the base URL
-                if ($locationHeader -match '^https?://') {
-                    $shareUrl = $locationHeader
-                }
-                else {
-                    $shareUrl = $baseUrl + $locationHeader
-                }
-
-                # Extract GUID from Location URL (e.g., /share/{guid}/ or https://host/share/{guid}/)
-                if ($locationHeader -match '/share/([0-9a-fA-F-]+)') {
-                    $shareId = $Matches[1]
-                    Write-Verbose "Extracted share GUID from Location header: $shareId"
-                }
-            }
-
-            # Build and return result object
-            [PSCustomObject]@{
-                ShareId       = $shareId
-                ShareUrl      = $shareUrl
-                ConnectorGuid = $connectorGuid
-                Path          = $Path
-                Lifetime      = if ($PSBoundParameters.ContainsKey('Lifetime')) { $Lifetime } else { $null }
-            }
-
-            Write-Verbose "=== Share Created Successfully ==="
         }
         catch {
             $errorMessage = $_.Exception.Message
             if ($errorMessage -like "Failed to create share:*") {
                 throw
             }
-            throw "Failed to create share: $errorMessage"
+            $PSCmdlet.ThrowTerminatingError(
+                [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new("Failed to create share: $errorMessage", $_.Exception),
+                    'KeepitApiError',
+                    [System.Management.Automation.ErrorCategory]::ConnectionError,
+                    $connectorGuid
+                )
+            )
         }
     }
 }
@@ -356,13 +375,15 @@ function New-KeepitShare {
 #>
 function Set-KeepitShare {
     [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
         [ValidateNotNullOrEmpty()]
+        [ValidatePattern('^[a-zA-Z0-9\-]+$')]
         [string]$ShareId,
 
         [Parameter(Mandatory = $false)]
-        [ValidatePattern('^P(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(\d+H)?(\d+M)?(\d+S)?)?$')]
+        [ValidatePattern('^P(?=\d|T\d)(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(\d+H)?(\d+M)?(\d+S)?)?$')]
         [string]$Lifetime,
 
         [Parameter(Mandatory = $false)]
@@ -389,7 +410,7 @@ function Set-KeepitShare {
             Write-Verbose "Initialization completed successfully"
         }
         catch {
-            throw "Failed to initialize: $($_.Exception.Message)"
+            throw
         }
     }
 
@@ -442,7 +463,7 @@ function Set-KeepitShare {
             Write-Verbose "Method: PUT"
             Write-Verbose "URI: $baseUrl/share/$ShareId"
             Write-Verbose "Content-Type: application/xml"
-            Write-Verbose "Request Body:`n$xmlBody"
+            Write-Verbose "Request Body:`n$($xmlBody -replace '<password>[^<]*</password>', '<password>***</password>')"
 
             if ($PSCmdlet.ShouldProcess("Share $ShareId", "Update share")) {
                 # Build request
@@ -469,7 +490,14 @@ function Set-KeepitShare {
             if ($errorMessage -like "Failed to update share:*") {
                 throw
             }
-            throw "Failed to update share: $errorMessage"
+            $PSCmdlet.ThrowTerminatingError(
+                [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new("Failed to update share: $errorMessage", $_.Exception),
+                    'KeepitApiError',
+                    [System.Management.Automation.ErrorCategory]::WriteError,
+                    $ShareId
+                )
+            )
         }
     }
 }
@@ -508,9 +536,11 @@ function Set-KeepitShare {
 #>
 function Remove-KeepitShare {
     [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
         [ValidateNotNullOrEmpty()]
+        [ValidatePattern('^[a-zA-Z0-9\-]+$')]
         [string]$ShareId
     )
 
@@ -525,7 +555,7 @@ function Remove-KeepitShare {
             Write-Verbose "Initialization completed successfully"
         }
         catch {
-            throw "Failed to initialize: $($_.Exception.Message)"
+            throw
         }
     }
 
@@ -562,7 +592,14 @@ function Remove-KeepitShare {
             if ($errorMessage -like "Failed to delete share:*") {
                 throw
             }
-            throw "Failed to delete share: $errorMessage"
+            $PSCmdlet.ThrowTerminatingError(
+                [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new("Failed to delete share: $errorMessage", $_.Exception),
+                    'KeepitApiError',
+                    [System.Management.Automation.ErrorCategory]::WriteError,
+                    $ShareId
+                )
+            )
         }
     }
 }

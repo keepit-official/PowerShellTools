@@ -1,3 +1,6 @@
+# Keepit API page size limit. The API returns pagesize-1 results, so we request 99+1=100 to get 99 results per page.
+$script:ApiPageSize = 99
+
 <#
 .SYNOPSIS
     Retrieves snapshot information for a Keepit connector
@@ -22,7 +25,7 @@
     Search backwards from StartTime instead of forwards. Useful for finding the most recent snapshot
     at or before a specific timestamp. Use with -ResultSize 1 to get just the closest snapshot.
 .PARAMETER ResultSize
-    Maximum number of snapshots to return. Default is 99.
+    Maximum number of snapshots to return. Default matches the API page size.
     Use "unlimited" to retrieve all matching snapshots (may require multiple API calls).
     Only applicable with Range and Count parameter sets.
 .EXAMPLE
@@ -60,10 +63,11 @@
     Int32 - Count of snapshots (for CountOnly mode)
 .NOTES
     Requires an active connection via Connect-KeepitService.
-    Returns up to 99 snapshots by default. Use -ResultSize to change this limit or specify "unlimited".
+    Returns up to $script:ApiPageSize snapshots by default. Use -ResultSize to change this limit or specify "unlimited".
 #>
 function Get-KeepitSnapshot {
     [CmdletBinding(DefaultParameterSetName = 'Latest')]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'Latest')]
         [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'Range')]
@@ -94,7 +98,7 @@ function Get-KeepitSnapshot {
             if ($_ -match '^\d+$' -and [int]$_ -ge 1) { return $true }
             throw "ResultSize must be a positive integer or 'unlimited'"
         })]
-        $ResultSize = 99,
+        $ResultSize = $script:ApiPageSize,
 
         [Parameter(Mandatory = $false, ParameterSetName = 'Range')]
         [switch]$Reverse
@@ -105,22 +109,7 @@ function Get-KeepitSnapshot {
 
         # Validate date parameters if provided
         if ($PSCmdlet.ParameterSetName -in @('Range', 'Count')) {
-            $today = [DateTime]::Today
-
-            if ($StartTime.Date -gt $today) {
-                throw "StartTime cannot be in the future. StartTime: $($StartTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), Today: $($today.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
-            }
-
-            if ($EndTime.Date -gt $today) {
-                throw "EndTime cannot be in the future. EndTime: $($EndTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), Today: $($today.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
-            }
-
-            # When Reverse is specified, StartTime should be later than EndTime (we search backwards)
-            if (-not $Reverse -and $StartTime -gt $EndTime) {
-                throw "StartTime cannot be later than EndTime. StartTime: $($StartTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), EndTime: $($EndTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
-            }
-
-            # Normalize times to UTC for consistent comparison with API times (which are UTC)
+            # Normalize times to UTC first, before any comparisons.
             # If Kind is Unspecified, treat as UTC (consistent with API behavior)
             # If Kind is Local, convert to UTC
             if ($StartTime.Kind -eq [DateTimeKind]::Unspecified) {
@@ -135,6 +124,23 @@ function Get-KeepitSnapshot {
             elseif ($EndTime.Kind -eq [DateTimeKind]::Local) {
                 $EndTime = $EndTime.ToUniversalTime()
             }
+
+            # Future-date validation uses UTC to avoid local-time-zone edge cases
+            $utcToday = [DateTime]::UtcNow.Date
+
+            if ($StartTime.Date -gt $utcToday) {
+                throw "StartTime cannot be in the future. StartTime: $($StartTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), Today (UTC): $($utcToday.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
+            }
+
+            if ($EndTime.Date -gt $utcToday) {
+                throw "EndTime cannot be in the future. EndTime: $($EndTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), Today (UTC): $($utcToday.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
+            }
+
+            # When Reverse is specified, StartTime should be later than EndTime (we search backwards)
+            if (-not $Reverse -and $StartTime -gt $EndTime) {
+                throw "StartTime cannot be later than EndTime. StartTime: $($StartTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), EndTime: $($EndTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
+            }
+
             Write-Verbose "Date range (UTC): $($StartTime.ToString('yyyy-MM-ddTHH:mm:ssZ')) to $($EndTime.ToString('yyyy-MM-ddTHH:mm:ssZ'))"
         }
 
@@ -145,7 +151,7 @@ function Get-KeepitSnapshot {
             $userId = Get-KeepitUserId -AuthHeader $authHeader -BaseUrl $baseUrl
         }
         catch {
-            throw "Failed to initialize: $($_.Exception.Message)"
+            throw
         }
     }
 
@@ -160,14 +166,14 @@ function Get-KeepitSnapshot {
                 'Latest' {
                     # GET /users/{userId}/devices/{deviceId}/history/latest
                     $uri = "$baseUrl/users/$userId/devices/$connectorGuid/history/latest"
+                    # Standardized to v4 for all parameter sets (required for DSL connector types)
                     $headers = @{
                         'Authorization' = $authHeader
-                        'Accept' = 'application/vnd.keepit.v1+xml'
+                        'Accept' = 'application/vnd.keepit.v4+xml'
                         'Content-Type' = 'application/xml'
                     }
 
                     Write-Verbose "Fetching latest snapshot from: $uri"
-                    Write-Verbose "Request headers: $($headers | ConvertTo-Json -Compress)"
                     $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
 
                     # Parse response - API returns <backup> elements
@@ -220,7 +226,7 @@ function Get-KeepitSnapshot {
                     $allSnapshots = [System.Collections.ArrayList]::new()
                     $currentStartDate = $StartTime
                     $iteration = 0
-                    $maxIterations = if ($isUnlimited) { 10000 } else { [Math]::Ceiling($targetSize / 99) + 1 }
+                    $maxIterations = if ($isUnlimited) { 10000 } else { [Math]::Ceiling($targetSize / $script:ApiPageSize) + 1 }
 
                     do {
                         $iteration++
@@ -234,9 +240,9 @@ function Get-KeepitSnapshot {
                         if ($spanDays -lt 1) { $spanDays = 1 }
                         $spanISO8601 = "P${spanDays}D"
 
-                        # Request items: use remaining needed if <= 99, otherwise 99 (API limit)
-                        $apiCount = if ($isUnlimited) { 99 } else { [Math]::Min($targetSize - $allSnapshots.Count, 99) }
-                        if ($apiCount -lt 1) { $apiCount = 99 }
+                        # Request items: use remaining needed if <= page size, otherwise full page (API limit)
+                        $apiCount = if ($isUnlimited) { $script:ApiPageSize } else { [Math]::Min($targetSize - $allSnapshots.Count, $script:ApiPageSize) }
+                        if ($apiCount -lt 1) { $apiCount = $script:ApiPageSize }
                         $reverseElement = if ($Reverse) { '<reverse/>' } else { '' }
                         $requestBody = "<range><start>$startTimestamp</start><span>$spanISO8601</span><count>$apiCount</count>$reverseElement</range>"
 
@@ -285,10 +291,10 @@ function Get-KeepitSnapshot {
                         }
 
                         # Check if we need to continue pagination
-                        if (-not $isUnlimited -and $targetSize -le 99) {
+                        if (-not $isUnlimited -and $targetSize -le $script:ApiPageSize) {
                             break
                         }
-                        if ($retrievedCount -lt 99) {
+                        if ($retrievedCount -lt $script:ApiPageSize) {
                             break
                         }
                         if (-not $isUnlimited -and $allSnapshots.Count -ge $targetSize) {
@@ -299,7 +305,7 @@ function Get-KeepitSnapshot {
                         $lastTimestamp = $backups[-1].tstamp
                         if ($lastTimestamp) {
                             # Parse the timestamp and add 1 second for the next page
-                            $parsedDate = [DateTime]::Parse($lastTimestamp, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
+                            $parsedDate = [DateTime]::Parse($lastTimestamp, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
                             $currentStartDate = $parsedDate.AddSeconds(1)
                             Write-Verbose "Next page starts at: $(ConvertTo-KeepitTimestamp -DateTime $currentStartDate)"
 
@@ -335,7 +341,7 @@ function Get-KeepitSnapshot {
                     $isUnlimited = $ResultSize -eq 'unlimited'
                     $targetSize = if ($isUnlimited) { [int]::MaxValue } else { [int]$ResultSize }
 
-                    if (-not $isUnlimited -and $targetSize -le 99) {
+                    if (-not $isUnlimited -and $targetSize -le $script:ApiPageSize) {
                         # Simple case: single API call to count endpoint
                         $uri = "$baseUrl/users/$userId/devices/$connectorGuid/history/count"
 
@@ -375,7 +381,7 @@ function Get-KeepitSnapshot {
                         $totalCount = 0
                         $currentStartDate = $StartTime
                         $iteration = 0
-                        $maxIterations = if ($isUnlimited) { 10000 } else { [Math]::Ceiling($targetSize / 99) + 1 }
+                        $maxIterations = if ($isUnlimited) { 10000 } else { [Math]::Ceiling($targetSize / $script:ApiPageSize) + 1 }
 
                         do {
                             $iteration++
@@ -388,10 +394,10 @@ function Get-KeepitSnapshot {
                             if ($spanDays -lt 1) { $spanDays = 1 }
                             $spanISO8601 = "P${spanDays}D"
 
-                            $requestBody = "<range><start>$startTimestamp</start><span>$spanISO8601</span><count>99</count></range>"
+                            $requestBody = "<range><start>$startTimestamp</start><span>$spanISO8601</span><count>$($script:ApiPageSize)</count></range>"
 
                             Write-Verbose "Fetching snapshot range for counting from: $uri"
-                            Write-Verbose "Query: start=$startTimestamp, span=$spanISO8601, count=99"
+                            Write-Verbose "Query: start=$startTimestamp, span=$spanISO8601, count=$($script:ApiPageSize)"
                             $response = Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -Body $requestBody -ErrorAction Stop
 
                             # Parse response
@@ -426,7 +432,7 @@ function Get-KeepitSnapshot {
                             Write-Verbose "Retrieved $retrievedCount snapshots, added $countToAdd to count (total: $totalCount)"
 
                             # Check if we need to continue
-                            if ($retrievedCount -lt 99) {
+                            if ($retrievedCount -lt $script:ApiPageSize) {
                                 break
                             }
                             if (-not $isUnlimited -and $totalCount -ge $targetSize) {
@@ -436,7 +442,7 @@ function Get-KeepitSnapshot {
                             # Get the timestamp of the last snapshot and use it + 1 second as new start
                             $lastTimestamp = $backups[-1].tstamp
                             if ($lastTimestamp) {
-                                $parsedDate = [DateTime]::Parse($lastTimestamp, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
+                                $parsedDate = [DateTime]::Parse($lastTimestamp, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
                                 $currentStartDate = $parsedDate.AddSeconds(1)
                                 Write-Verbose "Next page starts at: $(ConvertTo-KeepitTimestamp -DateTime $currentStartDate)"
 
@@ -466,7 +472,16 @@ function Get-KeepitSnapshot {
             }
         }
         catch {
-            throw "Failed to retrieve snapshots for connector $connectorGuid : $($_.Exception.Message)"
+            # Use $Connector (input parameter) as fallback if $connectorGuid was never assigned
+            $connectorIdentifier = if ($connectorGuid) { $connectorGuid } else { $Connector }
+            $PSCmdlet.ThrowTerminatingError(
+                [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new("Failed to retrieve snapshots for connector $connectorIdentifier : $($_.Exception.Message)", $_.Exception),
+                    'KeepitApiError',
+                    [System.Management.Automation.ErrorCategory]::ConnectionError,
+                    $connectorIdentifier
+                )
+            )
         }
     }
 }
@@ -522,6 +537,13 @@ function Get-KeepitSnapshot {
 .PARAMETER EndTime
     End of snapshot date range (ISO8601 or DateTime).
     When StartTime and EndTime are the same date, the search covers the entire day.
+.PARAMETER ReceivedTime
+    Filter by source-system received date (start). Uses range(received:...) filter
+    instead of snaptimeFrom, filtering by when the email was received in Exchange
+    rather than when Keepit took the snapshot. Dates are sent as date-only ISO 8601
+    (YYYY-MM-DD) to avoid colon collision with the range() delimiter syntax.
+.PARAMETER ReceivedEndTime
+    Filter by source-system received date (end). Used with ReceivedTime.
 .PARAMETER Recursive
     Search recursively in subfolders of RootPath.
     By default, searches only the immediate RootPath. Use -Recursive to include subfolders.
@@ -597,6 +619,7 @@ function Get-KeepitSnapshot {
 #>
 function Search-KeepitSnapshot {
     [CmdletBinding(DefaultParameterSetName = 'Default')]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
         [ValidateNotNullOrEmpty()]
@@ -635,6 +658,12 @@ function Search-KeepitSnapshot {
 
         [Parameter(Mandatory = $false)]
         [DateTime]$EndTime,
+
+        [Parameter(Mandatory = $false)]
+        [DateTime]$ReceivedTime,
+
+        [Parameter(Mandatory = $false)]
+        [DateTime]$ReceivedEndTime,
 
         [Parameter(Mandatory = $false)]
         [switch]$Recursive,
@@ -677,6 +706,23 @@ function Search-KeepitSnapshot {
             throw "RootPath must start with a forward slash (/). Received: '$RootPath'"
         }
 
+        # Normalize RootPath segment casing: the API is case-sensitive and expects initial caps
+        # on named path elements (e.g., 'Users', 'Devices', 'Outlook').
+        # Leave GUIDs (contain hyphens matching the GUID pattern) and UPNs (contain @) unchanged.
+        if ($RootPath) {
+            $guidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+            $normalizedSegments = ($RootPath -split '/') | ForEach-Object {
+                if ($_ -eq '' -or $_ -match '@' -or $_ -match $guidPattern) {
+                    $_
+                }
+                else {
+                    $_.Substring(0, 1).ToUpper() + $_.Substring(1)
+                }
+            }
+            $RootPath = $normalizedSegments -join '/'
+            Write-Verbose "Normalized RootPath: $RootPath"
+        }
+
         # Validate that CountOnly and ResultSize are not both specified
         if ($CountOnly -and $PSBoundParameters.ContainsKey('ResultSize')) {
             throw "Cannot specify both -CountOnly and -ResultSize. Use -CountOnly to get just the count, or -ResultSize to get results."
@@ -685,6 +731,11 @@ function Search-KeepitSnapshot {
         # Validate that EndTime is not before StartTime
         if ($StartTime -and $EndTime -and $EndTime -lt $StartTime) {
             throw "EndTime ($($EndTime.ToString('yyyy-MM-dd'))) cannot be before StartTime ($($StartTime.ToString('yyyy-MM-dd')))"
+        }
+
+        # Validate that ReceivedEndTime is not before ReceivedTime
+        if ($ReceivedTime -and $ReceivedEndTime -and $ReceivedEndTime -lt $ReceivedTime) {
+            throw "ReceivedEndTime cannot be before ReceivedTime."
         }
 
         # Determine if we're doing unlimited results
@@ -701,7 +752,67 @@ function Search-KeepitSnapshot {
             Write-Verbose "Base URL: $baseUrl, User ID: $userId"
         }
         catch {
-            throw "Failed to initialize: $($_.Exception.Message)"
+            throw
+        }
+
+        # Helper function to safely get property value from XML or PSObject
+        # Defined in begin block so it is created once, not on every pipeline iteration
+        function Get-SafeValue {
+            param($obj, $propName)
+            if ($null -eq $obj) { return $null }
+
+            try {
+                $val = $null
+
+                # For XML elements, try multiple access methods
+                if ($obj -is [System.Xml.XmlElement]) {
+                    # Try direct property access first
+                    $val = $obj.$propName
+
+                    # If that didn't work and propName has a colon (namespace), try without namespace
+                    if ($null -eq $val -and $propName -match ':') {
+                        $localName = $propName -replace '^.*:', ''
+                        $val = $obj.$localName
+                    }
+
+                    # Try SelectSingleNode for namespaced elements
+                    if ($null -eq $val) {
+                        $localName = $propName -replace '^.*:', ''
+                        $node = $obj.SelectSingleNode("*[local-name()='$localName']")
+                        if ($node) { $val = $node }
+                    }
+
+                    # Try GetElementsByTagName
+                    if ($null -eq $val) {
+                        $localName = $propName -replace '^.*:', ''
+                        $nodes = $obj.GetElementsByTagName($localName)
+                        if ($nodes -and $nodes.Count -gt 0) { $val = $nodes[0] }
+                    }
+                }
+                else {
+                    # Standard property access for non-XML objects
+                    $val = $obj.$propName
+                }
+
+                # Extract text value from the result
+                if ($val -is [System.Xml.XmlElement]) {
+                    return $val.InnerText
+                }
+                elseif ($val -is [System.Xml.XmlNode]) {
+                    return $val.InnerText
+                }
+                elseif ($val -is [PSCustomObject] -and $val.'#text') {
+                    return $val.'#text'
+                }
+                elseif ($null -ne $val -and $val -isnot [System.Array]) {
+                    $strVal = $val.ToString()
+                    if ($strVal -and $strVal -ne $val.GetType().FullName) {
+                        return $strVal
+                    }
+                }
+            }
+            catch { }
+            return $null
         }
     }
 
@@ -857,6 +968,23 @@ function Search-KeepitSnapshot {
             }
             $filterParts += '!sys'
 
+            # Add range(received:...) filter for source-system received date
+            # Uses date-only ISO 8601 format (YYYY-MM-DD) to avoid colon
+            # collision with range(key:from:to) delimiter syntax.
+            if ($ReceivedTime -or $ReceivedEndTime) {
+                $lower = if ($ReceivedTime) {
+                    $ReceivedTime.ToUniversalTime().ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+                } else {
+                    '1970-01-01'
+                }
+                $upper = if ($ReceivedEndTime) {
+                    $ReceivedEndTime.ToUniversalTime().ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+                } else {
+                    [DateTime]::UtcNow.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+                }
+                $filterParts += "range(received:$($lower):$($upper))"
+            }
+
             # Add item type filters
             $itemTypeFilters = @()
             if ($ItemType) {
@@ -989,10 +1117,14 @@ function Search-KeepitSnapshot {
             $currentIndex = $StartIndex
             $totalReturned = 0
             $hasMoreResults = $true
+            # When client-side filtering is active (Entra connector + DeletedOnly),
+            # always request full page from the API so that filtered-out items don't
+            # cause the shrinking $requestCount to terminate pagination early.
+            $clientSideFiltering = ($resolved.Type -eq 'azure-ad' -and $DeletedOnly)
 
             while ($hasMoreResults) {
                 # Calculate count for this request
-                $requestCount = if ($isUnlimited) {
+                $requestCount = if ($isUnlimited -or $clientSideFiltering) {
                     $pageSize
                 }
                 else {
@@ -1010,7 +1142,6 @@ function Search-KeepitSnapshot {
 
                 Write-Verbose "=== API Request ==="
                 Write-Verbose "Request URI: $uri"
-                Write-Verbose "Request Headers: $($headers | ConvertTo-Json -Compress)"
                 Write-Verbose "Fetching results $currentIndex to $($currentIndex + $requestCount - 1)"
 
                 # Make API call
@@ -1157,70 +1288,10 @@ function Search-KeepitSnapshot {
                     $name = $null
                     $title = $null
                     $updated = $null
-                    $published = $null
                     $size = $null
                     $contentType = $null
                     $isDeleted = $false
                     $detectedType = $null
-
-                    # Helper function to safely get property value from XML or PSObject
-                    function Get-SafeValue {
-                        param($obj, $propName)
-                        if ($null -eq $obj) { return $null }
-
-                        try {
-                            $val = $null
-
-                            # For XML elements, try multiple access methods
-                            if ($obj -is [System.Xml.XmlElement]) {
-                                # Try direct property access first
-                                $val = $obj.$propName
-
-                                # If that didn't work and propName has a colon (namespace), try without namespace
-                                if ($null -eq $val -and $propName -match ':') {
-                                    $localName = $propName -replace '^.*:', ''
-                                    $val = $obj.$localName
-                                }
-
-                                # Try SelectSingleNode for namespaced elements
-                                if ($null -eq $val) {
-                                    $localName = $propName -replace '^.*:', ''
-                                    $node = $obj.SelectSingleNode("*[local-name()='$localName']")
-                                    if ($node) { $val = $node }
-                                }
-
-                                # Try GetElementsByTagName
-                                if ($null -eq $val) {
-                                    $localName = $propName -replace '^.*:', ''
-                                    $nodes = $obj.GetElementsByTagName($localName)
-                                    if ($nodes -and $nodes.Count -gt 0) { $val = $nodes[0] }
-                                }
-                            }
-                            else {
-                                # Standard property access for non-XML objects
-                                $val = $obj.$propName
-                            }
-
-                            # Extract text value from the result
-                            if ($val -is [System.Xml.XmlElement]) {
-                                return $val.InnerText
-                            }
-                            elseif ($val -is [System.Xml.XmlNode]) {
-                                return $val.InnerText
-                            }
-                            elseif ($val -is [PSCustomObject] -and $val.'#text') {
-                                return $val.'#text'
-                            }
-                            elseif ($null -ne $val -and $val -isnot [System.Array]) {
-                                $strVal = $val.ToString()
-                                if ($strVal -and $strVal -ne $val.GetType().FullName) {
-                                    return $strVal
-                                }
-                            }
-                        }
-                        catch { }
-                        return $null
-                    }
 
                     # Try to extract standard Atom fields
                     $id = Get-SafeValue $entry 'id'
@@ -1375,6 +1446,7 @@ function Search-KeepitSnapshot {
                         Name          = $name
                         Title         = $title
                         Updated       = $updated
+                        Published     = $published
                         Size          = $size
                         ContentType   = $contentType
                         ItemType      = $detectedType
@@ -1417,7 +1489,7 @@ function Search-KeepitSnapshot {
             Write-Verbose "Total results returned: $totalReturned"
 
             if ($totalReturned -eq 0) {
-                Write-Warning "Search-KeepitSnapshot: No matching results found"
+                Write-Verbose "Search-KeepitSnapshot: No matching results found"
             }
         }
         catch {
@@ -1452,7 +1524,16 @@ function Search-KeepitSnapshot {
             }
 
             # Default error handling for other errors
-            throw "Failed to search connector $connectorGuid : $exceptionMessage"
+            # Use $Connector (input parameter) as fallback if $connectorGuid was never assigned
+            $connectorIdentifier = if ($connectorGuid) { $connectorGuid } else { $Connector }
+            $PSCmdlet.ThrowTerminatingError(
+                [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new("Failed to search connector $connectorIdentifier : $exceptionMessage", $_.Exception),
+                    'KeepitApiError',
+                    [System.Management.Automation.ErrorCategory]::ConnectionError,
+                    $connectorIdentifier
+                )
+            )
         }
     }
 }
@@ -1472,6 +1553,7 @@ function Search-KeepitSnapshot {
 #>
 function ConvertTo-MaskedPath {
     [CmdletBinding()]
+    [OutputType([string])]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path

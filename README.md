@@ -127,6 +127,7 @@ Remove-Module KeepitTools
 | `Disable-KeepitConnector`          | Disables a connector                                               |
 | `Submit-KeepitJob`                 | Submits backup/restore jobs with raw XML configuration             |
 | `Restore-KeepitBulkDeletedItems`   | Bulk restores deleted email items from Keepit backups              |
+| `Start-KeepitExpressRestore`       | Express restore of recent user data by time window (Experimental)  |
 | `Get-KeepitAuditLog`               | Retrieves audit log entries with optional date and area filtering  |
 | `Get-KeepitShare`                  | Lists all shared secure links for the authenticated user           |
 | `New-KeepitShare`                  | Creates a shared secure link with optional password and expiry     |
@@ -450,6 +451,31 @@ Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector 
 Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "your-connector-guid" -RootPath "Deleted Items" -StartTime (Get-Date).AddDays(-30) -EndTime (Get-Date) -WhatIf
 ```
 
+### Express Restore (Experimental)
+
+The `Start-KeepitExpressRestore` cmdlet provides a streamlined way to restore a subset of recent user data from Keepit backups. During a disaster
+recovery, you might want to give selected users fast access to, say, 3 days of mail first, then backfill their mailboxes with older mail. 
+Instead of manually selecting items and submitting restore jobs, or restoring entire mailboxes, you specify a time window and the cmdlet handles item discovery, snapshot grouping, and job submission automatically.
+
+Express restore searches by the source-system received date (when Exchange received the email) rather than by Keepit snapshot time, so it finds items regardless of which snapshot they ended up in.
+
+Consider a disaster that happened on 2026-02-23. You want to quickly recover mail for your CEO for the preceding 3-day period:
+
+```powershell
+Start-KeepitExpressRestore -UserPrincipalName "ceo@example.com" -Connector "Production M365" -Workload Exchange -Timespan "P3D" -StartTime "2026-02-23"
+```
+
+The `-StartTime` parameter sets the end of the restore window (defaults to now). Items received between `(StartTime - Timespan)` and `StartTime` are restored.
+
+As with many other cmdlets, the `-WhatIf` switch will show you what the cmdlet _would_ do so you can judge whether it will restore the desired data.
+
+You may provide a set of UPNs as a pipeline for batch processing.
+
+The `-PrioritizeCalendar` switch will create a separate, higher-priority, job to restore calendar data first; this is a common request for DR for
+executives.
+
+For now, this cmdlet doesn't restore items in subfolders, and it doesn't yet support restores in OneDrive. Both are planned.
+
 ### View Audit Logs
 
 ```powershell
@@ -605,7 +631,7 @@ user3@example.com
 
 ### Restoring deleted email
 
-Here's a simple example of restoring deleted mail for a single user:
+Here's a simple example of bulk-restoring deleted mail for a single user:
 
 ```
 Restore-KeepitBulkDeletedItems -connector "ExO Only" -UserPrincipalName paulr@blackdotpub.com `

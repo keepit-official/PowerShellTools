@@ -41,6 +41,7 @@ Returns PSCustomObject with properties:
 #>
 function Connect-KeepitService {
     [CmdletBinding(DefaultParameterSetName = 'Credential')]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true, ParameterSetName = 'Credential')]
         [PSCredential]$Credential,
@@ -87,7 +88,7 @@ function Connect-KeepitService {
         if ($response.user.id) {
             $script:KeepitUserId = $response.user.id
             Write-Verbose "Successfully connected. User ID: $($script:KeepitUserId)"
-            Write-Host "Successfully connected to Keepit service ($Environment)" -ForegroundColor Green
+            Write-Information "Successfully connected to Keepit service ($Environment)" -InformationAction Continue
 
             # Return connection info if PassThru is specified
 
@@ -108,7 +109,14 @@ function Connect-KeepitService {
         $script:KeepitRegion = $null
         $script:KeepitUserId = $null
 
-        throw "Failed to connect to Keepit service: $($_.Exception.Message)"
+        $PSCmdlet.ThrowTerminatingError(
+            [System.Management.Automation.ErrorRecord]::new(
+                [System.Exception]::new("Failed to connect to Keepit service: $($_.Exception.Message)", $_.Exception),
+                'KeepitConnectionError',
+                [System.Management.Automation.ErrorCategory]::ConnectionError,
+                $Environment
+            )
+        )
     }
 }
 
@@ -129,6 +137,7 @@ function Connect-KeepitService {
 #>
 function Disconnect-KeepitService {
     [CmdletBinding()]
+    [OutputType([void])]
     param()
 
     try {
@@ -139,13 +148,20 @@ function Disconnect-KeepitService {
             $script:KeepitRegion = $null
             $script:KeepitUserId = $null
 
-            Write-Host "Disconnected from Keepit service" -ForegroundColor Green
+            Write-Information "Disconnected from Keepit service" -InformationAction Continue
         }
         else {
             Write-Warning "Not currently connected to Keepit service"
         }
     }
     catch {
-        throw "Error during disconnect: $($_.Exception.Message)"
+        $PSCmdlet.ThrowTerminatingError(
+            [System.Management.Automation.ErrorRecord]::new(
+                [System.Exception]::new("Error during disconnect: $($_.Exception.Message)", $_.Exception),
+                'KeepitConnectionError',
+                [System.Management.Automation.ErrorCategory]::ConnectionError,
+                $null
+            )
+        )
     }
 }

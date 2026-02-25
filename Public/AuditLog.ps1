@@ -51,6 +51,7 @@
 #>
 function Get-KeepitAuditLog {
     [CmdletBinding()]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $false)]
         [DateTime]$StartTime,
@@ -108,7 +109,8 @@ function Get-KeepitAuditLog {
         }
 
         # Build filter XML
-        $filterXml = "<filter><account>$userId</account>"
+        $escapedUserId = [System.Security.SecurityElement]::Escape($userId)
+        $filterXml = "<filter><account>$escapedUserId</account>"
 
         if ($hasStartTime -and $hasEndTime) {
             $fromTimestamp = $StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
@@ -177,6 +179,13 @@ function Get-KeepitAuditLog {
         Write-Verbose "=== End Get-KeepitAuditLog ==="
     }
     catch {
-        throw "Failed to retrieve audit logs: $($_.Exception.Message)"
+        $PSCmdlet.ThrowTerminatingError(
+            [System.Management.Automation.ErrorRecord]::new(
+                [System.Exception]::new("Failed to retrieve audit logs: $($_.Exception.Message)", $_.Exception),
+                'KeepitApiError',
+                [System.Management.Automation.ErrorCategory]::ConnectionError,
+                $null
+            )
+        )
     }
 }

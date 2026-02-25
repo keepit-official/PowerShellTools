@@ -1,3 +1,170 @@
+# ---------------------------------------------------------------------------
+# Private helpers for Set-KeepitConnectorConfiguration add/remove list logic
+# ---------------------------------------------------------------------------
+
+<#
+.SYNOPSIS
+    Adds string items to a list inside a config section, skipping duplicates.
+.DESCRIPTION
+    Ensures the list key exists in the section hashtable, then appends each
+    item that is not already present. Comparison uses the supplied Normalize
+    scriptblock so the same helper works for GUIDs (ToLowerInvariant),
+    URL strings (Trim/TrimEnd/ToLower), and exact-match categories (identity).
+#>
+function Add-ToConfigStringList {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Section,
+        [Parameter(Mandatory)][string]$ListKey,
+        [Parameter(Mandatory)][string[]]$Items,
+        [scriptblock]$Normalize = { param($s) $s.ToLowerInvariant() },
+        [string]$ItemLabel = 'item'
+    )
+
+    if (-not $Section.ContainsKey($ListKey)) {
+        $Section[$ListKey] = @()
+    }
+
+    $list = [System.Collections.ArrayList]@($Section[$ListKey])
+
+    foreach ($item in $Items) {
+        $normalizedItem = & $Normalize $item
+        $alreadyExists = $list | Where-Object { (& $Normalize $_) -eq $normalizedItem }
+        if (-not $alreadyExists) {
+            [void]$list.Add($item)
+            Write-Verbose "Added $ItemLabel`: $item"
+        }
+        else {
+            Write-Warning "$ItemLabel already in $ListKey, skipping: $item"
+        }
+    }
+
+    $Section[$ListKey] = @($list)
+}
+
+<#
+.SYNOPSIS
+    Removes string items from a list inside a config section.
+.DESCRIPTION
+    Warns for each item not found, then filters the list to remove matches.
+    If the section or list key does not exist, warns for every item.
+#>
+function Remove-FromConfigStringList {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Section,
+        [Parameter(Mandatory)][string]$ListKey,
+        [Parameter(Mandatory)][string[]]$Items,
+        [scriptblock]$Normalize = { param($s) $s.ToLowerInvariant() },
+        [string]$ItemLabel = 'item'
+    )
+
+    if (-not $Section -or -not $Section.ContainsKey($ListKey)) {
+        foreach ($item in $Items) {
+            Write-Warning "$ItemLabel not found in $ListKey, skipping: $item"
+        }
+        return
+    }
+
+    $list = [System.Collections.ArrayList]@($Section[$ListKey])
+
+    foreach ($item in $Items) {
+        $normalizedItem = & $Normalize $item
+        $exists = $list | Where-Object { (& $Normalize $_) -eq $normalizedItem }
+        if (-not $exists) {
+            Write-Warning "$ItemLabel not found in $ListKey, skipping: $item"
+        }
+    }
+
+    $normalizedToRemove = $Items | ForEach-Object { & $Normalize $_ }
+    $remaining = $list | Where-Object { (& $Normalize $_) -notin $normalizedToRemove }
+
+    $Section[$ListKey] = @($remaining)
+    Write-Verbose "Removed ${ItemLabel}s from $ListKey, remaining: $(@($remaining).Count)"
+}
+
+<#
+.SYNOPSIS
+    Adds site collection objects to SiteCollections in a config section.
+.DESCRIPTION
+    Each added site is a hashtable with SiteUrl and AutoIncludeAllSubSites.
+    Duplicates are detected by URL-normalised comparison of the SiteUrl property.
+#>
+function Add-ToSiteCollectionList {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Section,
+        [Parameter(Mandatory)][string[]]$SiteUrls
+    )
+
+    if (-not $Section.ContainsKey('SiteCollections')) {
+        $Section['SiteCollections'] = @()
+    }
+
+    $list = [System.Collections.ArrayList]@($Section['SiteCollections'])
+
+    foreach ($siteUrl in $SiteUrls) {
+        $normalizedUrl = $siteUrl.Trim().TrimEnd('/').ToLowerInvariant()
+        $alreadyExists = $list | Where-Object {
+            $_.SiteUrl.Trim().TrimEnd('/').ToLowerInvariant() -eq $normalizedUrl
+        }
+        if (-not $alreadyExists) {
+            $newSite = @{
+                SiteUrl                = $siteUrl.Trim().TrimEnd('/')
+                AutoIncludeAllSubSites = $true
+            }
+            [void]$list.Add($newSite)
+            Write-Verbose "Added site: $siteUrl"
+        }
+        else {
+            Write-Warning "Site already included, skipping: $siteUrl"
+        }
+    }
+
+    $Section['SiteCollections'] = @($list)
+}
+
+<#
+.SYNOPSIS
+    Removes site collection objects from SiteCollections by URL match.
+#>
+function Remove-FromSiteCollectionList {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Section,
+        [Parameter(Mandatory)][string[]]$SiteUrls
+    )
+
+    if (-not $Section -or -not $Section.ContainsKey('SiteCollections')) {
+        foreach ($siteUrl in $SiteUrls) {
+            Write-Warning "Site not found in included sites, skipping: $siteUrl"
+        }
+        return
+    }
+
+    $list = [System.Collections.ArrayList]@($Section['SiteCollections'])
+
+    foreach ($siteUrl in $SiteUrls) {
+        $normalizedUrl = $siteUrl.Trim().TrimEnd('/').ToLowerInvariant()
+        $exists = $list | Where-Object {
+            $_.SiteUrl.Trim().TrimEnd('/').ToLowerInvariant() -eq $normalizedUrl
+        }
+        if (-not $exists) {
+            Write-Warning "Site not found in included sites, skipping: $siteUrl"
+        }
+    }
+
+    $urlsToRemove = $SiteUrls | ForEach-Object { $_.Trim().TrimEnd('/').ToLowerInvariant() }
+    $remaining = $list | Where-Object {
+        $_.SiteUrl.Trim().TrimEnd('/').ToLowerInvariant() -notin $urlsToRemove
+    }
+
+    $Section['SiteCollections'] = @($remaining)
+    Write-Verbose "Removed sites, remaining: $(@($remaining).Count)"
+}
+
+# ---------------------------------------------------------------------------
+
 <#
 .SYNOPSIS
     Retrieves Keepit connectors for the authenticated user
@@ -18,6 +185,11 @@
 .PARAMETER IncludeDeleted
     When specified, includes deleted connectors in the response. Appends '?all=1' to the API request.
     Deleted connectors have a deletion-deadline set and will have Deleted = $true in the output.
+.PARAMETER Environment
+    Optional Keepit environment to target instead of the cached connection environment.
+    Valid values include production environments (ws.keepit, au-sy, ca-tr, dk-co, de-fr,
+    uk-ld, us-dc, ch-zh) and test environments (ws-test, ws-test-b, ws-test-c, staging, dev).
+    When omitted, uses the environment established by Connect-KeepitService.
 .PARAMETER Raw
     When specified, returns the raw XML response from the API instead of parsed connector objects.
     Useful for debugging or when you need access to all XML elements.
@@ -84,25 +256,29 @@
 #>
 function Get-KeepitConnector {
     [CmdletBinding()]
+    [OutputType([PSCustomObject])]
     param(
-        [Parameter(Mandatory = $false, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(ValueFromPipelineByPropertyName = $true)]
         [Alias('Id')]
         [ValidateNotNullOrEmpty()]
         [string]$Identity,
 
-        [Parameter(Mandatory = $false)]
         [ValidateScript({ Test-ConnectorTypeName -TypeName $_ })]
         [string[]]$Type,
 
-        [Parameter(Mandatory = $false)]
         [switch]$IncludeDeleted,
 
-        [Parameter(Mandatory = $false)]
+        [ValidateScript({ $_ -in $script:ValidKeepitEnvironments })]
+        [string]$Environment,
+
         [switch]$Raw
     )
 
-    try {
+    begin {
         Write-Verbose "Retrieving Keepit connectors"
+        $rawMode = $false
+        $cachedDevices = @()
+        $outputCount = 0
 
         # Resolve type names to internal keys (handles both keys and display names)
         $resolvedTypes = if ($Type) {
@@ -111,121 +287,154 @@ function Get-KeepitConnector {
             $null
         }
 
-        # Get authentication header from cache
-        $authHeader = Get-AuthHeader
+        try {
+            # Get authentication header from cache
+            $authHeader = Get-AuthHeader
 
-        # Get base URL and user ID from cache
-        $baseUrl = Get-KeepitBaseUrl
-        $userId = $script:KeepitUserId
+            # Get base URL (use explicit Environment if provided, otherwise cached)
+            $baseUrl = Get-KeepitBaseUrl -Environment $Environment
+            $userId = $script:KeepitUserId
 
-        if (-not $userId) {
-            throw "Unable to determine user ID. Ensure you are connected using Connect-KeepitService."
-        }
-
-        Write-Verbose "User ID: $userId"
-
-        # Build request
-        $uri = "$baseUrl/users/$userId/devices"
-        if ($IncludeDeleted) {
-            $uri += '?all=1'
-            Write-Verbose "Including deleted connectors (all=1)"
-        }
-        $headers = @{
-            'Authorization' = $authHeader
-            'Content-Type' = 'application/xml'
-            'Accept' = 'application/vnd.keepit.v4+xml'  # v4+ required for DSL connector device-type
-        }
-
-        Write-Verbose "Fetching connectors from: $uri"
-
-        # If -Raw is specified, return the raw XML response
-        if ($Raw) {
-            Write-Verbose "Returning raw XML response"
-            $webResponse = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
-            return $webResponse.Content
-        }
-
-        # Make API call
-        $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
-
-        # Parse XML response
-        if (-not $response.devices.cloud) {
-            Write-Verbose "No connectors found in response"
-            return
-        }
-
-        # Normalize to array (PowerShell XML may return single object or array)
-        $devices = if ($response.devices.cloud -is [System.Array]) {
-            $response.devices.cloud
-        }
-        else {
-            @($response.devices.cloud)
-        }
-
-        Write-Verbose "Found $($devices.Count) total connectors"
-
-        # Filter and transform devices
-        $filteredCount = 0
-        foreach ($device in $devices) {
-            # Skip inaccessible devices
-            if ($device.accessible -eq 'false') {
-                Write-Verbose "Skipping inaccessible connector: $($device.name)"
-                continue
+            if (-not $userId) {
+                throw "Unable to determine user ID. Ensure you are connected using Connect-KeepitService."
             }
 
-            # Validate required fields
-            if (-not $device.guid -or -not $device.name) {
-                Write-Verbose "Skipping connector with missing required fields"
-                continue
+            Write-Verbose "User ID: $userId"
+
+            # Build request
+            $uri = "$baseUrl/users/$userId/devices"
+            if ($IncludeDeleted) {
+                $uri += '?all=1'
+                Write-Verbose "Including deleted connectors (all=1)"
+            }
+            $headers = @{
+                'Authorization' = $authHeader
+                'Content-Type'  = 'application/xml'
+                'Accept'        = 'application/vnd.keepit.v4+xml'  # v4+ required for DSL connector device-type
             }
 
-            # Determine device type (handle DSL connectors)
-            $deviceType = if ($device.type -eq 'dsl') {
-                $device.'agent-type'
+            Write-Verbose "Fetching connectors from: $uri"
+
+            # If -Raw is specified, return the raw XML response
+            if ($Raw) {
+                Write-Verbose "Returning raw XML response"
+                $webResponse = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+                $webResponse.Content
+                $rawMode = $true
+                return
+            }
+
+            # Make API call
+            $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+
+            # Parse XML response
+            if (-not $response.devices.cloud) {
+                Write-Verbose "No connectors found in response"
+                return
+            }
+
+            # Normalize to array (PowerShell XML may return single object or array)
+            $devices = if ($response.devices.cloud -is [System.Array]) {
+                $response.devices.cloud
             }
             else {
-                $device.type
+                @($response.devices.cloud)
             }
 
-            # Filter by type if specified
-            if ($resolvedTypes -and $deviceType -notin $resolvedTypes) {
-                Write-Verbose "Skipping connector: $($device.name) (type: $deviceType) - not in requested types"
-                continue
-            }
+            Write-Verbose "Found $($devices.Count) total connectors"
 
-            # Filter by Identity if specified (match name or GUID)
-            if ($Identity) {
-                $guidMatch = $device.guid -eq $Identity -or $device.guid -eq $Identity.ToLower()
-                $nameMatch = $device.name -eq $Identity
-                if (-not $guidMatch -and -not $nameMatch) {
+            # Pre-filter by accessibility and type, build cached device list
+            foreach ($device in $devices) {
+                # Skip inaccessible devices
+                if ($device.accessible -eq 'false') {
+                    Write-Verbose "Skipping inaccessible connector: $($device.name)"
                     continue
                 }
-            }
 
-            $filteredCount++
+                # Validate required fields
+                if (-not $device.guid -or -not $device.name) {
+                    Write-Verbose "Skipping connector with missing required fields"
+                    continue
+                }
 
-            # Determine if connector is marked for deletion
-            $isDeleted = -not [string]::IsNullOrWhiteSpace($device.'deletion-deadline')
+                # Determine device type (handle DSL connectors)
+                $deviceType = if ($device.type -eq 'dsl') {
+                    $device.'agent-type'
+                }
+                else {
+                    $device.type
+                }
 
-            # Create and output connector object
-            [PSCustomObject]@{
-                ConnectorGuid    = $device.guid.ToLower()
-                Name             = $device.name.Substring(0, [Math]::Min(200, $device.name.Length))
-                Type             = $deviceType
-                TypeDisplayName  = Get-ConnectorTypeDisplayName -ConnectorType $deviceType
-                Created          = $device.created
-                BackupRetention  = ConvertFrom-ISO8601Duration -Duration $device.'backup-retention'
-                RetentionUpdated = $device.'backup-retention-updated'
-                OrgLink          = $device.orglink
-                Deleted          = $isDeleted
+                # Filter by type if specified
+                if ($resolvedTypes -and $deviceType -notin $resolvedTypes) {
+                    Write-Verbose "Skipping connector: $($device.name) (type: $deviceType) - not in requested types"
+                    continue
+                }
+
+                # Determine if connector is marked for deletion
+                $isDeleted = -not [string]::IsNullOrWhiteSpace($device.'deletion-deadline')
+
+                # Create and cache connector object
+                $cachedDevices += [PSCustomObject]@{
+                    ConnectorGuid    = $device.guid.ToLower()
+                    Name             = $(
+                        $nameLength = $device.name.Length
+                        $name = $device.name.Substring(0, [Math]::Min(200, $nameLength))
+                        if ($nameLength -gt 200) {
+                            Write-Warning "Connector name '$($device.name.Substring(0,50))...' truncated from $nameLength to 200 characters"
+                        }
+                        $name
+                    )
+                    Type             = $deviceType
+                    TypeDisplayName  = Get-ConnectorTypeDisplayName -ConnectorType $deviceType
+                    Created          = $device.created
+                    BackupRetention  = ConvertFrom-ISO8601Duration -Duration $device.'backup-retention'
+                    RetentionUpdated = $device.'backup-retention-updated'
+                    OrgLink          = $device.orglink
+                    Deleted          = $isDeleted
+                }
             }
         }
-
-        $typeDesc = if ($Type) { ($Type -join ', ') } else { 'all types' }
-        Write-Verbose "Returned $filteredCount connectors ($typeDesc)"
+        catch {
+            $PSCmdlet.ThrowTerminatingError(
+                [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new("Failed to retrieve connectors: $($_.Exception.Message)", $_.Exception),
+                    'KeepitApiError',
+                    [System.Management.Automation.ErrorCategory]::ConnectionError,
+                    $null
+                )
+            )
+        }
     }
-    catch {
-        throw "Failed to retrieve connectors: $($_.Exception.Message)"
+
+    process {
+        if ($rawMode) { return }
+
+        if ($Identity) {
+            # Filter cached devices by Identity (match name or GUID)
+            foreach ($connector in $cachedDevices) {
+                $guidMatch = $connector.ConnectorGuid -eq $Identity
+                $nameMatch = $connector.Name -eq $Identity
+                if ($guidMatch -or $nameMatch) {
+                    $connector
+                    $outputCount++
+                }
+            }
+        }
+        else {
+            # Output all cached devices
+            foreach ($connector in $cachedDevices) {
+                $connector
+                $outputCount++
+            }
+        }
+    }
+
+    end {
+        if (-not $rawMode) {
+            $typeDesc = if ($Type) { ($Type -join ', ') } else { 'all types' }
+            Write-Verbose "Returned $outputCount connectors ($typeDesc)"
+        }
     }
 }
 
@@ -380,24 +589,21 @@ function Get-KeepitConnector {
 #>
 function Get-KeepitConnectorConfiguration {
     [CmdletBinding()]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
         [ValidateNotNullOrEmpty()]
         [Alias('ConnectorGuid', 'Name')]
         [string]$Connector,
 
-        [Parameter(Mandatory = $false)]
         [ValidateNotNullOrEmpty()]
         [string]$Attributes,
 
-        [Parameter(Mandatory = $false)]
         [ValidateNotNullOrEmpty()]
         [string[]]$Workload,
 
-        [Parameter(Mandatory = $false)]
         [switch]$Raw,
 
-        [Parameter(Mandatory = $false)]
         [switch]$Coverage
     )
 
@@ -412,7 +618,7 @@ function Get-KeepitConnectorConfiguration {
             Write-Verbose "Base URL: $baseUrl, User ID: $userId"
         }
         catch {
-            throw "Failed to initialize: $($_.Exception.Message)"
+            throw
         }
     }
 
@@ -510,7 +716,12 @@ function Get-KeepitConnectorConfiguration {
                     Write-Verbose "Configuration retrieved: $($configXml.Length) characters"
                 }
                 catch {
-                    Write-Verbose "Failed to retrieve default configuration: $($_.Exception.Message)"
+                    $statusCode = $null
+                    if ($_.Exception.Response) { $statusCode = [int]$_.Exception.Response.StatusCode }
+                    if ($statusCode -in 401, 403) {
+                        throw
+                    }
+                    Write-Warning "Failed to retrieve configuration for connector ${connectorGuid}: $($_.Exception.Message)"
                     $configXml = $null
                 }
             }
@@ -684,7 +895,14 @@ function Get-KeepitConnectorConfiguration {
         }
         catch {
             $errorGuid = if ($connectorGuid) { $connectorGuid } else { $Connector }
-            throw "Failed to retrieve configuration for connector '$errorGuid': $($_.Exception.Message)"
+            $PSCmdlet.ThrowTerminatingError(
+                [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new("Failed to retrieve configuration for connector '$errorGuid': $($_.Exception.Message)", $_.Exception),
+                    'KeepitApiError',
+                    [System.Management.Automation.ErrorCategory]::ConnectionError,
+                    $errorGuid
+                )
+            )
         }
     }
 }
@@ -851,13 +1069,13 @@ function Get-KeepitConnectorConfiguration {
 #>
 function Set-KeepitConnectorConfiguration {
     [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
         [ValidateNotNullOrEmpty()]
         [Alias('ConnectorGuid', 'Name')]
         [string]$Connector,
 
-        [Parameter(Mandatory = $false)]
         [ValidateNotNullOrEmpty()]
         [ValidateScript({
             if ($_.Length -gt 65536) {
@@ -865,7 +1083,7 @@ function Set-KeepitConnectorConfiguration {
             }
             # Basic JSON validation
             try {
-                $null = $_ | ConvertFrom-Json
+                $null = $_ | ConvertFrom-Json -AsHashtable
                 $true
             }
             catch {
@@ -874,65 +1092,47 @@ function Set-KeepitConnectorConfiguration {
         })]
         [string]$RawConfiguration,
 
-        [Parameter(Mandatory = $false)]
         [ValidateNotNullOrEmpty()]
         [string]$Workload,
 
         # SharePoint configuration parameters
-        [Parameter(Mandatory = $false)]
         [bool]$AutoIncludeSites,
 
-        [Parameter(Mandatory = $false)]
         [string[]]$AddIncludedSites,
 
-        [Parameter(Mandatory = $false)]
         [string[]]$RemoveIncludedSites,
 
-        [Parameter(Mandatory = $false)]
         [string[]]$AddExcludedSites,
 
-        [Parameter(Mandatory = $false)]
         [string[]]$RemoveExcludedSites,
 
         # Teams/UnifiedGroups configuration parameters
-        [Parameter(Mandatory = $false)]
         [bool]$AutoIncludeGroups,
 
-        [Parameter(Mandatory = $false)]
         [string[]]$AddIncludedGroups,
 
-        [Parameter(Mandatory = $false)]
         [string[]]$RemoveIncludedGroups,
 
-        [Parameter(Mandatory = $false)]
         [string[]]$AddExcludedGroups,
 
-        [Parameter(Mandatory = $false)]
         [string[]]$RemoveExcludedGroups,
 
         # Exchange configuration parameters
-        [Parameter(Mandatory = $false)]
         [ValidateSet('Tasks', 'Mail', 'Contacts', 'Calendar', 'InPlaceArchive')]
         [string[]]$EnabledCategories,
 
         # UserSelectionRules parameters (for Exchange and OneDrive workloads)
-        [Parameter(Mandatory = $false)]
         [string[]]$AddIncludedUsers,
 
-        [Parameter(Mandatory = $false)]
         [string[]]$RemoveIncludedUsers,
 
-        [Parameter(Mandatory = $false)]
         [string[]]$AddExcludedUsers,
 
-        [Parameter(Mandatory = $false)]
         [string[]]$RemoveExcludedUsers,
 
-        [Parameter(Mandatory = $false)]
         [ValidateSet('AllUsers', 'AllGroups', 'UsersNotInGroups')]
         [string[]]$AddIncludedCategories,
 
-        [Parameter(Mandatory = $false)]
         [ValidateSet('AllUsers', 'AllGroups', 'UsersNotInGroups')]
         [string[]]$RemoveIncludedCategories
     )
@@ -948,7 +1148,7 @@ function Set-KeepitConnectorConfiguration {
             Write-Verbose "Base URL: $baseUrl, User ID: $userId"
         }
         catch {
-            throw "Failed to initialize: $($_.Exception.Message)"
+            throw
         }
     }
 
@@ -1145,7 +1345,14 @@ function Set-KeepitConnectorConfiguration {
                     Write-Verbose "Retrieved current configuration: $($effectiveRawConfig.Length) characters"
                 }
                 catch {
-                    throw "Failed to retrieve current configuration for connector '$connectorGuid': $($_.Exception.Message)"
+                    $PSCmdlet.ThrowTerminatingError(
+                        [System.Management.Automation.ErrorRecord]::new(
+                            [System.Exception]::new("Failed to retrieve current configuration for connector '$connectorGuid': $($_.Exception.Message)", $_.Exception),
+                            'KeepitApiError',
+                            [System.Management.Automation.ErrorCategory]::ConnectionError,
+                            $connectorGuid
+                        )
+                    )
                 }
             }
 
@@ -1161,7 +1368,14 @@ function Set-KeepitConnectorConfiguration {
                     $configObj = $effectiveRawConfig | ConvertFrom-Json -AsHashtable
                 }
                 catch {
-                    throw "Failed to parse configuration as JSON: $($_.Exception.Message)"
+                    $PSCmdlet.ThrowTerminatingError(
+                        [System.Management.Automation.ErrorRecord]::new(
+                            [System.Exception]::new("Failed to parse configuration as JSON: $($_.Exception.Message)", $_.Exception),
+                            'KeepitConfigError',
+                            [System.Management.Automation.ErrorCategory]::InvalidArgument,
+                            $connectorGuid
+                        )
+                    )
                 }
 
                 # Check for INFO message when site list params used with AutoIncludeAllSiteCollections
@@ -1197,67 +1411,14 @@ function Set-KeepitConnectorConfiguration {
                         $configObj['SharePointNG'] = @{}
                     }
 
-                    $spConfig = $configObj['SharePointNG']
-
-                    # Get existing SiteCollections array or create new one
-                    if (-not $spConfig.ContainsKey('SiteCollections')) {
-                        $spConfig['SiteCollections'] = @()
-                    }
-
-                    $existingSites = [System.Collections.ArrayList]@($spConfig['SiteCollections'])
-
-                    foreach ($siteUrl in $AddIncludedSites) {
-                        $normalizedUrl = $siteUrl.Trim().TrimEnd('/').ToLowerInvariant()
-                        $alreadyExists = $existingSites | Where-Object {
-                            $_.SiteUrl.Trim().TrimEnd('/').ToLowerInvariant() -eq $normalizedUrl
-                        }
-                        if (-not $alreadyExists) {
-                            $newSite = @{
-                                SiteUrl = $siteUrl.Trim().TrimEnd('/')
-                                AutoIncludeAllSubSites = $true
-                            }
-                            $null = $existingSites.Add($newSite)
-                            Write-Verbose "Added site: $siteUrl"
-                        }
-                        else {
-                            Write-Warning "Site already included, skipping: $siteUrl"
-                        }
-                    }
-
-                    $spConfig['SiteCollections'] = @($existingSites)
+                    Add-ToSiteCollectionList -Section $configObj['SharePointNG'] -SiteUrls $AddIncludedSites
                 }
 
                 # Apply RemoveIncludedSites modification
                 if ($PSBoundParameters.ContainsKey('RemoveIncludedSites') -and $RemoveIncludedSites.Count -gt 0) {
                     Write-Verbose "Processing RemoveIncludedSites parameter: $($RemoveIncludedSites.Count) sites"
 
-                    $spConfig = $configObj['SharePointNG']
-                    if ($spConfig -and $spConfig.ContainsKey('SiteCollections')) {
-                        $existingSites = [System.Collections.ArrayList]@($spConfig['SiteCollections'])
-
-                        foreach ($siteUrl in $RemoveIncludedSites) {
-                            $normalizedUrl = $siteUrl.Trim().TrimEnd('/').ToLowerInvariant()
-                            $exists = $existingSites | Where-Object {
-                                $_.SiteUrl.Trim().TrimEnd('/').ToLowerInvariant() -eq $normalizedUrl
-                            }
-                            if (-not $exists) {
-                                Write-Warning "Site not found in included sites, skipping: $siteUrl"
-                            }
-                        }
-
-                        $urlsToRemove = $RemoveIncludedSites | ForEach-Object { $_.Trim().TrimEnd('/').ToLowerInvariant() }
-                        $remainingSites = $existingSites | Where-Object {
-                            $_.SiteUrl.Trim().TrimEnd('/').ToLowerInvariant() -notin $urlsToRemove
-                        }
-
-                        $spConfig['SiteCollections'] = @($remainingSites)
-                        Write-Verbose "Removed sites, remaining: $(@($remainingSites).Count)"
-                    }
-                    else {
-                        foreach ($siteUrl in $RemoveIncludedSites) {
-                            Write-Warning "Site not found in included sites, skipping: $siteUrl"
-                        }
-                    }
+                    Remove-FromSiteCollectionList -Section $configObj['SharePointNG'] -SiteUrls $RemoveIncludedSites
                 }
 
                 # Apply AddExcludedSites modification
@@ -1269,63 +1430,19 @@ function Set-KeepitConnectorConfiguration {
                         $configObj['SharePointNG'] = @{}
                     }
 
-                    $spConfig = $configObj['SharePointNG']
-
-                    # Get existing ExcludedSiteCollections array or create new one
-                    if (-not $spConfig.ContainsKey('ExcludedSiteCollections')) {
-                        $spConfig['ExcludedSiteCollections'] = @()
-                    }
-
-                    $existingSites = [System.Collections.ArrayList]@($spConfig['ExcludedSiteCollections'])
-
-                    foreach ($siteUrl in $AddExcludedSites) {
-                        $normalizedUrl = $siteUrl.Trim().TrimEnd('/').ToLowerInvariant()
-                        $alreadyExists = $existingSites | Where-Object {
-                            $_.Trim().TrimEnd('/').ToLowerInvariant() -eq $normalizedUrl
-                        }
-                        if (-not $alreadyExists) {
-                            $null = $existingSites.Add($siteUrl.Trim().TrimEnd('/'))
-                            Write-Verbose "Added excluded site: $siteUrl"
-                        }
-                        else {
-                            Write-Warning "Site already excluded, skipping: $siteUrl"
-                        }
-                    }
-
-                    $spConfig['ExcludedSiteCollections'] = @($existingSites)
+                    $urlNormalize = { param($s) $s.Trim().TrimEnd('/').ToLowerInvariant() }
+                    Add-ToConfigStringList -Section $configObj['SharePointNG'] -ListKey 'ExcludedSiteCollections' `
+                        -Items ($AddExcludedSites | ForEach-Object { $_.Trim().TrimEnd('/') }) `
+                        -Normalize $urlNormalize -ItemLabel 'Site'
                 }
 
                 # Apply RemoveExcludedSites modification
                 if ($PSBoundParameters.ContainsKey('RemoveExcludedSites') -and $RemoveExcludedSites.Count -gt 0) {
                     Write-Verbose "Processing RemoveExcludedSites parameter: $($RemoveExcludedSites.Count) sites"
 
-                    $spConfig = $configObj['SharePointNG']
-                    if ($spConfig -and $spConfig.ContainsKey('ExcludedSiteCollections')) {
-                        $existingSites = [System.Collections.ArrayList]@($spConfig['ExcludedSiteCollections'])
-
-                        foreach ($siteUrl in $RemoveExcludedSites) {
-                            $normalizedUrl = $siteUrl.Trim().TrimEnd('/').ToLowerInvariant()
-                            $exists = $existingSites | Where-Object {
-                                $_.Trim().TrimEnd('/').ToLowerInvariant() -eq $normalizedUrl
-                            }
-                            if (-not $exists) {
-                                Write-Warning "Site not found in excluded sites, skipping: $siteUrl"
-                            }
-                        }
-
-                        $urlsToRemove = $RemoveExcludedSites | ForEach-Object { $_.Trim().TrimEnd('/').ToLowerInvariant() }
-                        $remainingSites = $existingSites | Where-Object {
-                            $_.Trim().TrimEnd('/').ToLowerInvariant() -notin $urlsToRemove
-                        }
-
-                        $spConfig['ExcludedSiteCollections'] = @($remainingSites)
-                        Write-Verbose "Removed excluded sites, remaining: $(@($remainingSites).Count)"
-                    }
-                    else {
-                        foreach ($siteUrl in $RemoveExcludedSites) {
-                            Write-Warning "Site not found in excluded sites, skipping: $siteUrl"
-                        }
-                    }
+                    $urlNormalize = { param($s) $s.Trim().TrimEnd('/').ToLowerInvariant() }
+                    Remove-FromConfigStringList -Section $configObj['SharePointNG'] -ListKey 'ExcludedSiteCollections' `
+                        -Items $RemoveExcludedSites -Normalize $urlNormalize -ItemLabel 'Site'
                 }
 
                 # Check for INFO message when group list params used with AutoIncludeGroups
@@ -1359,59 +1476,16 @@ function Set-KeepitConnectorConfiguration {
                         $configObj['UnifiedGroups'] = @{}
                     }
 
-                    $ugConfig = $configObj['UnifiedGroups']
-
-                    # Get existing IncludeGroups array or create new one
-                    if (-not $ugConfig.ContainsKey('IncludeGroups')) {
-                        $ugConfig['IncludeGroups'] = @()
-                    }
-
-                    $existingGroups = [System.Collections.ArrayList]@($ugConfig['IncludeGroups'])
-
-                    foreach ($groupGuid in $AddIncludedGroups) {
-                        $normalizedGuid = $groupGuid.ToLowerInvariant()
-                        $alreadyExists = $existingGroups | Where-Object { $_.ToLowerInvariant() -eq $normalizedGuid }
-                        if (-not $alreadyExists) {
-                            $null = $existingGroups.Add($groupGuid)
-                            Write-Verbose "Added group: $groupGuid"
-                        }
-                        else {
-                            Write-Warning "Group already included, skipping: $groupGuid"
-                        }
-                    }
-
-                    $ugConfig['IncludeGroups'] = @($existingGroups)
+                    Add-ToConfigStringList -Section $configObj['UnifiedGroups'] -ListKey 'IncludeGroups' `
+                        -Items $AddIncludedGroups -ItemLabel 'Group'
                 }
 
                 # Apply RemoveIncludedGroups modification
                 if ($PSBoundParameters.ContainsKey('RemoveIncludedGroups') -and $RemoveIncludedGroups.Count -gt 0) {
                     Write-Verbose "Processing RemoveIncludedGroups parameter: $($RemoveIncludedGroups.Count) groups"
 
-                    $ugConfig = $configObj['UnifiedGroups']
-                    if ($ugConfig -and $ugConfig.ContainsKey('IncludeGroups')) {
-                        $existingGroups = [System.Collections.ArrayList]@($ugConfig['IncludeGroups'])
-
-                        foreach ($groupGuid in $RemoveIncludedGroups) {
-                            $normalizedGuid = $groupGuid.ToLowerInvariant()
-                            $exists = $existingGroups | Where-Object { $_.ToLowerInvariant() -eq $normalizedGuid }
-                            if (-not $exists) {
-                                Write-Warning "Group not found in included groups, skipping: $groupGuid"
-                            }
-                        }
-
-                        $guidsToRemove = $RemoveIncludedGroups | ForEach-Object { $_.ToLowerInvariant() }
-                        $remainingGroups = $existingGroups | Where-Object {
-                            $_.ToLowerInvariant() -notin $guidsToRemove
-                        }
-
-                        $ugConfig['IncludeGroups'] = @($remainingGroups)
-                        Write-Verbose "Removed groups, remaining: $($remainingGroups.Count)"
-                    }
-                    else {
-                        foreach ($groupGuid in $RemoveIncludedGroups) {
-                            Write-Warning "Group not found in included groups, skipping: $groupGuid"
-                        }
-                    }
+                    Remove-FromConfigStringList -Section $configObj['UnifiedGroups'] -ListKey 'IncludeGroups' `
+                        -Items $RemoveIncludedGroups -ItemLabel 'Group'
                 }
 
                 # Apply AddExcludedGroups modification
@@ -1423,59 +1497,16 @@ function Set-KeepitConnectorConfiguration {
                         $configObj['UnifiedGroups'] = @{}
                     }
 
-                    $ugConfig = $configObj['UnifiedGroups']
-
-                    # Get existing ExcludeGroups array or create new one
-                    if (-not $ugConfig.ContainsKey('ExcludeGroups')) {
-                        $ugConfig['ExcludeGroups'] = @()
-                    }
-
-                    $existingGroups = [System.Collections.ArrayList]@($ugConfig['ExcludeGroups'])
-
-                    foreach ($groupGuid in $AddExcludedGroups) {
-                        $normalizedGuid = $groupGuid.ToLowerInvariant()
-                        $alreadyExists = $existingGroups | Where-Object { $_.ToLowerInvariant() -eq $normalizedGuid }
-                        if (-not $alreadyExists) {
-                            $null = $existingGroups.Add($groupGuid)
-                            Write-Verbose "Added excluded group: $groupGuid"
-                        }
-                        else {
-                            Write-Warning "Group already excluded, skipping: $groupGuid"
-                        }
-                    }
-
-                    $ugConfig['ExcludeGroups'] = @($existingGroups)
+                    Add-ToConfigStringList -Section $configObj['UnifiedGroups'] -ListKey 'ExcludeGroups' `
+                        -Items $AddExcludedGroups -ItemLabel 'Group'
                 }
 
                 # Apply RemoveExcludedGroups modification
                 if ($PSBoundParameters.ContainsKey('RemoveExcludedGroups') -and $RemoveExcludedGroups.Count -gt 0) {
                     Write-Verbose "Processing RemoveExcludedGroups parameter: $($RemoveExcludedGroups.Count) groups"
 
-                    $ugConfig = $configObj['UnifiedGroups']
-                    if ($ugConfig -and $ugConfig.ContainsKey('ExcludeGroups')) {
-                        $existingGroups = [System.Collections.ArrayList]@($ugConfig['ExcludeGroups'])
-
-                        foreach ($groupGuid in $RemoveExcludedGroups) {
-                            $normalizedGuid = $groupGuid.ToLowerInvariant()
-                            $exists = $existingGroups | Where-Object { $_.ToLowerInvariant() -eq $normalizedGuid }
-                            if (-not $exists) {
-                                Write-Warning "Group not found in excluded groups, skipping: $groupGuid"
-                            }
-                        }
-
-                        $guidsToRemove = $RemoveExcludedGroups | ForEach-Object { $_.ToLowerInvariant() }
-                        $remainingGroups = $existingGroups | Where-Object {
-                            $_.ToLowerInvariant() -notin $guidsToRemove
-                        }
-
-                        $ugConfig['ExcludeGroups'] = @($remainingGroups)
-                        Write-Verbose "Removed excluded groups, remaining: $($remainingGroups.Count)"
-                    }
-                    else {
-                        foreach ($groupGuid in $RemoveExcludedGroups) {
-                            Write-Warning "Group not found in excluded groups, skipping: $groupGuid"
-                        }
-                    }
+                    Remove-FromConfigStringList -Section $configObj['UnifiedGroups'] -ListKey 'ExcludeGroups' `
+                        -Items $RemoveExcludedGroups -ItemLabel 'Group'
                 }
 
                 # Apply EnabledCategories modification for Exchange workload
@@ -1531,215 +1562,67 @@ function Set-KeepitConnectorConfiguration {
                     if ($PSBoundParameters.ContainsKey('AddIncludedUsers') -and $AddIncludedUsers.Count -gt 0) {
                         Write-Verbose "Processing AddIncludedUsers parameter: $($AddIncludedUsers.Count) users"
 
-                        if (-not $usrConfig.ContainsKey('IncludeUsers')) {
-                            $usrConfig['IncludeUsers'] = @()
-                        }
-
-                        $existingUsers = [System.Collections.ArrayList]@($usrConfig['IncludeUsers'])
-
-                        foreach ($userGuid in $AddIncludedUsers) {
-                            $normalizedGuid = $userGuid.ToLowerInvariant()
-                            $alreadyExists = $existingUsers | Where-Object { $_.ToLowerInvariant() -eq $normalizedGuid }
-                            if (-not $alreadyExists) {
-                                $null = $existingUsers.Add($userGuid)
-                                Write-Verbose "Added included user: $userGuid"
-                            }
-                            else {
-                                Write-Warning "User already included, skipping: $userGuid"
-                            }
-                        }
-
-                        $usrConfig['IncludeUsers'] = @($existingUsers)
+                        Add-ToConfigStringList -Section $usrConfig -ListKey 'IncludeUsers' `
+                            -Items $AddIncludedUsers -ItemLabel 'User'
                     }
 
                     # Apply RemoveIncludedUsers modification
                     if ($PSBoundParameters.ContainsKey('RemoveIncludedUsers') -and $RemoveIncludedUsers.Count -gt 0) {
                         Write-Verbose "Processing RemoveIncludedUsers parameter: $($RemoveIncludedUsers.Count) users"
 
-                        if ($usrConfig.ContainsKey('IncludeUsers')) {
-                            $existingUsers = [System.Collections.ArrayList]@($usrConfig['IncludeUsers'])
-
-                            foreach ($userGuid in $RemoveIncludedUsers) {
-                                $normalizedGuid = $userGuid.ToLowerInvariant()
-                                $exists = $existingUsers | Where-Object { $_.ToLowerInvariant() -eq $normalizedGuid }
-                                if (-not $exists) {
-                                    Write-Warning "User not found in included users, skipping: $userGuid"
-                                }
-                            }
-
-                            $guidsToRemove = $RemoveIncludedUsers | ForEach-Object { $_.ToLowerInvariant() }
-                            $remainingUsers = $existingUsers | Where-Object {
-                                $_.ToLowerInvariant() -notin $guidsToRemove
-                            }
-
-                            $usrConfig['IncludeUsers'] = @($remainingUsers)
-                            Write-Verbose "Removed included users, remaining: $(@($remainingUsers).Count)"
-                        }
-                        else {
-                            foreach ($userGuid in $RemoveIncludedUsers) {
-                                Write-Warning "User not found in included users, skipping: $userGuid"
-                            }
-                        }
+                        Remove-FromConfigStringList -Section $usrConfig -ListKey 'IncludeUsers' `
+                            -Items $RemoveIncludedUsers -ItemLabel 'User'
                     }
 
                     # Apply AddExcludedUsers modification
                     if ($PSBoundParameters.ContainsKey('AddExcludedUsers') -and $AddExcludedUsers.Count -gt 0) {
                         Write-Verbose "Processing AddExcludedUsers parameter: $($AddExcludedUsers.Count) users"
 
-                        if (-not $usrConfig.ContainsKey('ExcludeUsers')) {
-                            $usrConfig['ExcludeUsers'] = @()
-                        }
-
-                        $existingUsers = [System.Collections.ArrayList]@($usrConfig['ExcludeUsers'])
-
-                        foreach ($userGuid in $AddExcludedUsers) {
-                            $normalizedGuid = $userGuid.ToLowerInvariant()
-                            $alreadyExists = $existingUsers | Where-Object { $_.ToLowerInvariant() -eq $normalizedGuid }
-                            if (-not $alreadyExists) {
-                                $null = $existingUsers.Add($userGuid)
-                                Write-Verbose "Added excluded user: $userGuid"
-                            }
-                            else {
-                                Write-Warning "User already excluded, skipping: $userGuid"
-                            }
-                        }
-
-                        $usrConfig['ExcludeUsers'] = @($existingUsers)
+                        Add-ToConfigStringList -Section $usrConfig -ListKey 'ExcludeUsers' `
+                            -Items $AddExcludedUsers -ItemLabel 'User'
                     }
 
                     # Apply RemoveExcludedUsers modification
                     if ($PSBoundParameters.ContainsKey('RemoveExcludedUsers') -and $RemoveExcludedUsers.Count -gt 0) {
                         Write-Verbose "Processing RemoveExcludedUsers parameter: $($RemoveExcludedUsers.Count) users"
 
-                        if ($usrConfig.ContainsKey('ExcludeUsers')) {
-                            $existingUsers = [System.Collections.ArrayList]@($usrConfig['ExcludeUsers'])
-
-                            foreach ($userGuid in $RemoveExcludedUsers) {
-                                $normalizedGuid = $userGuid.ToLowerInvariant()
-                                $exists = $existingUsers | Where-Object { $_.ToLowerInvariant() -eq $normalizedGuid }
-                                if (-not $exists) {
-                                    Write-Warning "User not found in excluded users, skipping: $userGuid"
-                                }
-                            }
-
-                            $guidsToRemove = $RemoveExcludedUsers | ForEach-Object { $_.ToLowerInvariant() }
-                            $remainingUsers = $existingUsers | Where-Object {
-                                $_.ToLowerInvariant() -notin $guidsToRemove
-                            }
-
-                            $usrConfig['ExcludeUsers'] = @($remainingUsers)
-                            Write-Verbose "Removed excluded users, remaining: $(@($remainingUsers).Count)"
-                        }
-                        else {
-                            foreach ($userGuid in $RemoveExcludedUsers) {
-                                Write-Warning "User not found in excluded users, skipping: $userGuid"
-                            }
-                        }
+                        Remove-FromConfigStringList -Section $usrConfig -ListKey 'ExcludeUsers' `
+                            -Items $RemoveExcludedUsers -ItemLabel 'User'
                     }
 
                     # Apply AddIncludedCategories modification
                     if ($PSBoundParameters.ContainsKey('AddIncludedCategories') -and $AddIncludedCategories.Count -gt 0) {
                         Write-Verbose "Processing AddIncludedCategories parameter: $($AddIncludedCategories -join ', ')"
 
-                        if (-not $usrConfig.ContainsKey('IncludeCategories')) {
-                            $usrConfig['IncludeCategories'] = @()
-                        }
-
-                        $existingCategories = [System.Collections.ArrayList]@($usrConfig['IncludeCategories'])
-
-                        foreach ($category in $AddIncludedCategories) {
-                            $alreadyExists = $existingCategories | Where-Object { $_ -eq $category }
-                            if (-not $alreadyExists) {
-                                $null = $existingCategories.Add($category)
-                                Write-Verbose "Added included category: $category"
-                            }
-                            else {
-                                Write-Warning "Category already included, skipping: $category"
-                            }
-                        }
-
-                        $usrConfig['IncludeCategories'] = @($existingCategories)
+                        # Categories use PowerShell default case-insensitive comparison (no explicit normalization)
+                        $identityNormalize = { param($s) $s }
+                        Add-ToConfigStringList -Section $usrConfig -ListKey 'IncludeCategories' `
+                            -Items $AddIncludedCategories -Normalize $identityNormalize -ItemLabel 'Category'
                     }
 
                     # Apply RemoveIncludedCategories modification
                     if ($PSBoundParameters.ContainsKey('RemoveIncludedCategories') -and $RemoveIncludedCategories.Count -gt 0) {
                         Write-Verbose "Processing RemoveIncludedCategories parameter: $($RemoveIncludedCategories -join ', ')"
 
-                        if ($usrConfig.ContainsKey('IncludeCategories')) {
-                            $existingCategories = [System.Collections.ArrayList]@($usrConfig['IncludeCategories'])
-
-                            foreach ($category in $RemoveIncludedCategories) {
-                                $exists = $existingCategories | Where-Object { $_ -eq $category }
-                                if (-not $exists) {
-                                    Write-Warning "Category not found in included categories, skipping: $category"
-                                }
-                            }
-
-                            $remainingCategories = $existingCategories | Where-Object { $_ -notin $RemoveIncludedCategories }
-
-                            $usrConfig['IncludeCategories'] = @($remainingCategories)
-                            Write-Verbose "Removed included categories, remaining: $(@($remainingCategories).Count)"
-                        }
-                        else {
-                            foreach ($category in $RemoveIncludedCategories) {
-                                Write-Warning "Category not found in included categories, skipping: $category"
-                            }
-                        }
+                        $identityNormalize = { param($s) $s }
+                        Remove-FromConfigStringList -Section $usrConfig -ListKey 'IncludeCategories' `
+                            -Items $RemoveIncludedCategories -Normalize $identityNormalize -ItemLabel 'Category'
                     }
 
                     # Apply AddIncludedGroups modification for UserSelectionRules (Exchange/OneDrive)
                     if ($PSBoundParameters.ContainsKey('AddIncludedGroups') -and $AddIncludedGroups.Count -gt 0) {
                         Write-Verbose "Processing AddIncludedGroups parameter for UserSelectionRules: $($AddIncludedGroups.Count) groups"
 
-                        if (-not $usrConfig.ContainsKey('IncludeGroups')) {
-                            $usrConfig['IncludeGroups'] = @()
-                        }
-
-                        $existingGroups = [System.Collections.ArrayList]@($usrConfig['IncludeGroups'])
-
-                        foreach ($groupGuid in $AddIncludedGroups) {
-                            $normalizedGuid = $groupGuid.ToLowerInvariant()
-                            $alreadyExists = $existingGroups | Where-Object { $_.ToLowerInvariant() -eq $normalizedGuid }
-                            if (-not $alreadyExists) {
-                                $null = $existingGroups.Add($groupGuid)
-                                Write-Verbose "Added included group to UserSelectionRules: $groupGuid"
-                            }
-                            else {
-                                Write-Warning "Group already included in UserSelectionRules, skipping: $groupGuid"
-                            }
-                        }
-
-                        $usrConfig['IncludeGroups'] = @($existingGroups)
+                        Add-ToConfigStringList -Section $usrConfig -ListKey 'IncludeGroups' `
+                            -Items $AddIncludedGroups -ItemLabel 'Group'
                     }
 
                     # Apply RemoveIncludedGroups modification for UserSelectionRules (Exchange/OneDrive)
                     if ($PSBoundParameters.ContainsKey('RemoveIncludedGroups') -and $RemoveIncludedGroups.Count -gt 0) {
                         Write-Verbose "Processing RemoveIncludedGroups parameter for UserSelectionRules: $($RemoveIncludedGroups.Count) groups"
 
-                        if ($usrConfig.ContainsKey('IncludeGroups')) {
-                            $existingGroups = [System.Collections.ArrayList]@($usrConfig['IncludeGroups'])
-
-                            foreach ($groupGuid in $RemoveIncludedGroups) {
-                                $normalizedGuid = $groupGuid.ToLowerInvariant()
-                                $exists = $existingGroups | Where-Object { $_.ToLowerInvariant() -eq $normalizedGuid }
-                                if (-not $exists) {
-                                    Write-Warning "Group not found in UserSelectionRules included groups, skipping: $groupGuid"
-                                }
-                            }
-
-                            $guidsToRemove = $RemoveIncludedGroups | ForEach-Object { $_.ToLowerInvariant() }
-                            $remainingGroups = $existingGroups | Where-Object {
-                                $_.ToLowerInvariant() -notin $guidsToRemove
-                            }
-
-                            $usrConfig['IncludeGroups'] = @($remainingGroups)
-                            Write-Verbose "Removed groups from UserSelectionRules, remaining: $(@($remainingGroups).Count)"
-                        }
-                        else {
-                            foreach ($groupGuid in $RemoveIncludedGroups) {
-                                Write-Warning "Group not found in UserSelectionRules included groups, skipping: $groupGuid"
-                            }
-                        }
+                        Remove-FromConfigStringList -Section $usrConfig -ListKey 'IncludeGroups' `
+                            -Items $RemoveIncludedGroups -ItemLabel 'Group'
                     }
                 }
 
@@ -1749,7 +1632,7 @@ function Set-KeepitConnectorConfiguration {
 
                 # Check if configuration actually changed
                 if ($effectiveRawConfig -eq $originalRawConfig) {
-                    Write-Host "No configuration changes requested; original configuration will remain untouched." -ForegroundColor Yellow
+                    Write-Information "No configuration changes requested; original configuration will remain untouched." -InformationAction Continue
                     return
                 }
             }
@@ -1774,30 +1657,30 @@ function Set-KeepitConnectorConfiguration {
 
             # For SharePoint workload with -WhatIf, show the raw configuration that would be written
             if ($WhatIfPreference -and $Workload -eq 'SharePoint') {
-                Write-Host "`nSharePoint configuration that would be written:" -ForegroundColor Cyan
-                Write-Host $effectiveRawConfig -ForegroundColor Yellow
-                Write-Host ""
+                Write-Information "`nSharePoint configuration that would be written:" -InformationAction Continue
+                Write-Information $effectiveRawConfig -InformationAction Continue
+                Write-Information "" -InformationAction Continue
             }
 
             # For Teams/UnifiedGroups workload with -WhatIf, show the raw configuration that would be written
             if ($WhatIfPreference -and $Workload -in @('Teams', 'UnifiedGroups')) {
-                Write-Host "`nTeams configuration that would be written:" -ForegroundColor Cyan
-                Write-Host $effectiveRawConfig -ForegroundColor Yellow
-                Write-Host ""
+                Write-Information "`nTeams configuration that would be written:" -InformationAction Continue
+                Write-Information $effectiveRawConfig -InformationAction Continue
+                Write-Information "" -InformationAction Continue
             }
 
             # For Exchange workload with -WhatIf, show the raw configuration that would be written
             if ($WhatIfPreference -and $Workload -eq 'Exchange') {
-                Write-Host "`nExchange configuration that would be written:" -ForegroundColor Cyan
-                Write-Host $effectiveRawConfig -ForegroundColor Yellow
-                Write-Host ""
+                Write-Information "`nExchange configuration that would be written:" -InformationAction Continue
+                Write-Information $effectiveRawConfig -InformationAction Continue
+                Write-Information "" -InformationAction Continue
             }
 
             # For OneDrive workload with -WhatIf, show the raw configuration that would be written
             if ($WhatIfPreference -and $Workload -eq 'OneDrive') {
-                Write-Host "`nOneDrive configuration that would be written:" -ForegroundColor Cyan
-                Write-Host $effectiveRawConfig -ForegroundColor Yellow
-                Write-Host ""
+                Write-Information "`nOneDrive configuration that would be written:" -InformationAction Continue
+                Write-Information $effectiveRawConfig -InformationAction Continue
+                Write-Information "" -InformationAction Continue
             }
 
             if ($PSCmdlet.ShouldProcess("$connectorName ($connectorGuid)", "Set $displayName configuration")) {
@@ -1825,20 +1708,20 @@ function Set-KeepitConnectorConfiguration {
                     Write-Verbose "API Error: $errorMessage"
                     Write-Verbose "Response: $($_.Exception.Response)"
 
-                    # Return error object
-                    [PSCustomObject]@{
-                        ConnectorGuid   = $connectorGuid
-                        Name            = $connectorName
-                        Type            = $connectorType
-                        TypeDisplayName = $displayName
-                        Status          = "Error: $errorMessage"
-                    }
+                    Write-Error "Failed to set configuration for connector '$connectorGuid': $errorMessage"
                 }
             }
         }
         catch {
             $errorGuid = if ($connectorGuid) { $connectorGuid } else { $Connector }
-            throw "Failed to set configuration for connector '$errorGuid': $($_.Exception.Message)"
+            $PSCmdlet.ThrowTerminatingError(
+                [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new("Failed to set configuration for connector '$errorGuid': $($_.Exception.Message)", $_.Exception),
+                    'KeepitConfigError',
+                    [System.Management.Automation.ErrorCategory]::WriteError,
+                    $errorGuid
+                )
+            )
         }
     }
 }
@@ -1881,7 +1764,8 @@ function Set-KeepitConnectorConfiguration {
     - DELETE /users/{userId}/devices/{connectorGUID}/attributes/disable_backup
 #>
 function Enable-KeepitConnector {
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
         [ValidateNotNullOrEmpty()]
@@ -1900,7 +1784,7 @@ function Enable-KeepitConnector {
             Write-Verbose "Base URL: $baseUrl, User ID: $userId"
         }
         catch {
-            throw "Failed to initialize: $($_.Exception.Message)"
+            throw
         }
     }
 
@@ -1920,7 +1804,7 @@ function Enable-KeepitConnector {
 
             $attributeExists = $false
             try {
-                $response = Invoke-WebRequest -Uri $attrUri -Method Get -Headers $headers -ErrorAction Stop
+                $null = Invoke-WebRequest -Uri $attrUri -Method Get -Headers $headers -ErrorAction Stop
                 $attributeExists = $true
                 Write-Verbose "disable_backup attribute exists, will delete it"
             }
@@ -1929,32 +1813,41 @@ function Enable-KeepitConnector {
                 Write-Verbose "disable_backup attribute not found - connector is already enabled"
             }
 
-            # Delete the attribute if it exists
-            if ($attributeExists) {
-                Write-Verbose "Deleting disable_backup attribute"
-                try {
-                    Invoke-RestMethod -Uri $attrUri -Method Delete -Headers $headers -ErrorAction Stop
-                    Write-Verbose "Successfully deleted disable_backup attribute"
+            if ($PSCmdlet.ShouldProcess($connectorName, 'Enable connector')) {
+                # Delete the attribute if it exists
+                if ($attributeExists) {
+                    Write-Verbose "Deleting disable_backup attribute"
+                    try {
+                        Invoke-RestMethod -Uri $attrUri -Method Delete -Headers $headers -ErrorAction Stop
+                        Write-Verbose "Successfully deleted disable_backup attribute"
+                    }
+                    catch {
+                        $PSCmdlet.ThrowTerminatingError(
+                            [System.Management.Automation.ErrorRecord]::new(
+                                [System.Exception]::new("Failed to delete disable_backup attribute: $($_.Exception.Message)", $_.Exception),
+                                'KeepitApiError',
+                                [System.Management.Automation.ErrorCategory]::WriteError,
+                                $connectorGuid
+                            )
+                        )
+                    }
                 }
-                catch {
-                    throw "Failed to delete disable_backup attribute: $($_.Exception.Message)"
-                }
-            }
 
-            # Return result object
-            [PSCustomObject]@{
-                ConnectorGuid = $connectorGuid
-                Name          = $connectorName
-                Enabled       = $true
-                Status        = 'Success'
+                # Return result object
+                [PSCustomObject]@{
+                    ConnectorGuid = $connectorGuid
+                    Name          = $connectorName
+                    Enabled       = $true
+                    Status        = 'Success'
+                }
             }
         }
         catch {
             Write-Error "Failed to enable connector '$Connector': $($_.Exception.Message)"
 
             [PSCustomObject]@{
-                ConnectorGuid = $connectorGuid
-                Name          = $connectorName
+                ConnectorGuid = if ($connectorGuid) { $connectorGuid } else { $Connector }
+                Name          = if ($connectorName) { $connectorName } else { $Connector }
                 Enabled       = $null
                 Status        = $_.Exception.Message
             }
@@ -2001,7 +1894,8 @@ function Enable-KeepitConnector {
     - PUT /users/{userId}/devices/{connectorGUID}/attributes/disable_backup
 #>
 function Disable-KeepitConnector {
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
         [ValidateNotNullOrEmpty()]
@@ -2020,7 +1914,7 @@ function Disable-KeepitConnector {
             Write-Verbose "Base URL: $baseUrl, User ID: $userId"
         }
         catch {
-            throw "Failed to initialize: $($_.Exception.Message)"
+            throw
         }
     }
 
@@ -2040,7 +1934,7 @@ function Disable-KeepitConnector {
 
             $attributeExists = $false
             try {
-                $response = Invoke-WebRequest -Uri $attrUri -Method Get -Headers $headers -ErrorAction Stop
+                $null = Invoke-WebRequest -Uri $attrUri -Method Get -Headers $headers -ErrorAction Stop
                 $attributeExists = $true
                 Write-Verbose "disable_backup attribute already exists - connector is already disabled"
             }
@@ -2049,38 +1943,47 @@ function Disable-KeepitConnector {
                 Write-Verbose "disable_backup attribute not found - will create it"
             }
 
-            # Set the attribute if it doesn't exist
-            if (-not $attributeExists) {
-                Write-Verbose "Setting disable_backup attribute to 1"
-                $putHeaders = @{
-                    'Authorization' = $authHeader
-                    'Content-Type'  = 'application/octet-stream'
+            if ($PSCmdlet.ShouldProcess($connectorName, 'Disable connector')) {
+                # Set the attribute if it doesn't exist
+                if (-not $attributeExists) {
+                    Write-Verbose "Setting disable_backup attribute to 1"
+                    $putHeaders = @{
+                        'Authorization' = $authHeader
+                        'Content-Type'  = 'application/octet-stream'
+                    }
+
+                    try {
+                        $body = [System.Text.Encoding]::UTF8.GetBytes("1")
+                        Invoke-RestMethod -Uri $attrUri -Method Put -Headers $putHeaders -Body $body -ErrorAction Stop
+                        Write-Verbose "Successfully set disable_backup attribute"
+                    }
+                    catch {
+                        $PSCmdlet.ThrowTerminatingError(
+                            [System.Management.Automation.ErrorRecord]::new(
+                                [System.Exception]::new("Failed to set disable_backup attribute: $($_.Exception.Message)", $_.Exception),
+                                'KeepitApiError',
+                                [System.Management.Automation.ErrorCategory]::WriteError,
+                                $connectorGuid
+                            )
+                        )
+                    }
                 }
 
-                try {
-                    $body = [System.Text.Encoding]::UTF8.GetBytes("1")
-                    Invoke-RestMethod -Uri $attrUri -Method Put -Headers $putHeaders -Body $body -ErrorAction Stop
-                    Write-Verbose "Successfully set disable_backup attribute"
+                # Return result object
+                [PSCustomObject]@{
+                    ConnectorGuid = $connectorGuid
+                    Name          = $connectorName
+                    Enabled       = $false
+                    Status        = 'Success'
                 }
-                catch {
-                    throw "Failed to set disable_backup attribute: $($_.Exception.Message)"
-                }
-            }
-
-            # Return result object
-            [PSCustomObject]@{
-                ConnectorGuid = $connectorGuid
-                Name          = $connectorName
-                Enabled       = $false
-                Status        = 'Success'
             }
         }
         catch {
             Write-Error "Failed to disable connector '$Connector': $($_.Exception.Message)"
 
             [PSCustomObject]@{
-                ConnectorGuid = $connectorGuid
-                Name          = $connectorName
+                ConnectorGuid = if ($connectorGuid) { $connectorGuid } else { $Connector }
+                Name          = if ($connectorName) { $connectorName } else { $Connector }
                 Enabled       = $null
                 Status        = $_.Exception.Message
             }
@@ -2142,7 +2045,8 @@ function Disable-KeepitConnector {
     Connector names must be unique within an account.
 #>
 function New-KeepitConnector {
-    [CmdletBinding(DefaultParameterSetName = 'NoConfig')]
+    [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'NoConfig')]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true)]
         [ValidateScript({ Test-ConnectorTypeName -TypeName $_ })]
@@ -2152,7 +2056,7 @@ function New-KeepitConnector {
         [ValidateLength(1, 255)]
         [string]$Name,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'ConfigString')]
+        [Parameter(ParameterSetName = 'ConfigString')]
         [ValidateScript({
             if ($_.Length -gt 65536) {
                 throw "Configuration exceeds maximum length of 64K characters"
@@ -2167,7 +2071,7 @@ function New-KeepitConnector {
         })]
         [string]$Configuration,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'ConfigFile')]
+        [Parameter(ParameterSetName = 'ConfigFile')]
         [ValidateScript({
             if (-not (Test-Path -Path $_ -PathType Leaf)) {
                 throw "Template file not found: $_"
@@ -2186,10 +2090,8 @@ function New-KeepitConnector {
         })]
         [string]$TemplateFile,
 
-        [Parameter(Mandatory = $false)]
         [string]$OrgLink,
 
-        [Parameter(Mandatory = $false)]
         [ValidatePattern('^P(\d+Y)?(\d+M)?(\d+W)?(\d+D)?$')]
         [string]$RetentionPeriod
     )
@@ -2199,11 +2101,6 @@ function New-KeepitConnector {
         Write-Verbose "Connector Type: $ConnectorType"
         Write-Verbose "Name: $Name"
 
-        # Validate that either Configuration or TemplateFile is provided
-        if (-not $Configuration -and -not $TemplateFile) {
-            throw "Either -Configuration or -TemplateFile must be specified."
-        }
-
         # Load configuration from template file if specified
         $configJson = $null
         if ($TemplateFile) {
@@ -2212,6 +2109,9 @@ function New-KeepitConnector {
         }
         elseif ($Configuration) {
             $configJson = $Configuration
+        }
+        else {
+            Write-Verbose "No configuration provided - connector will be created without initial configuration"
         }
 
         # Get authentication header and base URL
@@ -2248,7 +2148,8 @@ function New-KeepitConnector {
 
         # Add orglink if specified (required for M365 connectors to link to tenant)
         if ($OrgLink) {
-            $xmlBody += "<orglink>$OrgLink</orglink>"
+            $escapedOrgLink = [System.Security.SecurityElement]::Escape($OrgLink)
+            $xmlBody += "<orglink>$escapedOrgLink</orglink>"
         }
 
         $xmlBody += "</cloud>"
@@ -2267,9 +2168,15 @@ function New-KeepitConnector {
             'Accept'        = 'application/vnd.keepit.v4+xml'
         }
 
+        if (-not $PSCmdlet.ShouldProcess($Name, "Create $ConnectorType connector")) {
+            return
+        }
+
         Write-Verbose "=== Sending API Request ==="
 
-        # Make API call using Invoke-WebRequest for better error handling
+        # Using -SkipHttpErrorCheck to handle API error responses manually.
+        # This allows parsing structured error XML from the response body
+        # rather than catching a generic WebException.
         $webResponse = Invoke-WebRequest -Uri $uri -Method Post -Headers $headers -Body $xmlBody -SkipHttpErrorCheck
 
         Write-Verbose "=== API Response Received ==="
@@ -2467,7 +2374,14 @@ function New-KeepitConnector {
         if ($errorMessage -like "Failed to create connector:*") {
             throw
         }
-        throw "Failed to create connector: $errorMessage"
+        $PSCmdlet.ThrowTerminatingError(
+            [System.Management.Automation.ErrorRecord]::new(
+                [System.Exception]::new("Failed to create connector: $errorMessage", $_.Exception),
+                'KeepitApiError',
+                [System.Management.Automation.ErrorCategory]::ConnectionError,
+                $null
+            )
+        )
     }
 }
 

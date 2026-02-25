@@ -3,7 +3,7 @@
     RootModule = 'KeepitTools.psm1'
 
     # Version number of this module
-    ModuleVersion = '1.2.0'
+    ModuleVersion = '1.3.0'
 
     # Supported PSEditions
     CompatiblePSEditions = @('Core')
@@ -86,7 +86,8 @@
         'Get-KeepitRoles',
         'Remove-KeepitUser',
         'Set-KeepitShare',
-        'Remove-KeepitShare'
+        'Remove-KeepitShare',
+        'Start-KeepitExpressRestore'
     )
 
     # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry
@@ -96,7 +97,11 @@
     VariablesToExport = @()
 
     # Aliases to export from this module, for best performance, do not use wildcards and do not delete the entry
-    AliasesToExport = @()
+    AliasesToExport = @(
+        'Get-KeepitJob',
+        'Get-KeepitRole',
+        'Find-KeepitSnapshot'
+    )
 
     # DSC resources to export from this module
     # DscResourcesToExport = @()
@@ -124,11 +129,13 @@
 
             # ReleaseNotes of this module
             ReleaseNotes = @'
-Version 1.2.0
-- Convert-KeepitGuidToUPN: New cmdlet to resolve Keepit backup GUIDs to User Principal Names
-- Convert-KeepitGuidToUPN: Accepts path-masked (double-dash) or standard UUID GUID format
-- Convert-KeepitGuidToUPN: Pipeline-efficient: two BSearch calls for any number of GUIDs
-- Convert-KeepitGuidToUPN: Covers active and previously-removed (deleted) users
+Version 1.3.0
+- Start-KeepitExpressRestore: New cmdlet for express restore of recent user data by time window (Experimental)
+- Start-KeepitExpressRestore: Support Exchange workload with -PrioritizeCalendar and -InboxOnly switches
+- Start-KeepitExpressRestore: Accept both PowerShell TimeSpan and ISO 8601 duration strings
+- Start-KeepitExpressRestore: Automatic job batching when XML exceeds 60 KB threshold
+- Start-KeepitExpressRestore: Pipeline support for multiple users via -UserPrincipalName
+- Search-KeepitSnapshot: Add -ReceivedTime and -ReceivedEndTime parameters for source-system date filtering
 
 Version 1.1.0
 - New-KeepitUser: New cmdlet to create Keepit user accounts with role assignment and connector access

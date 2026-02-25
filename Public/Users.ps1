@@ -39,7 +39,8 @@
     Requires an active connection via Connect-KeepitService.
 #>
 function New-KeepitUser {
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
@@ -120,105 +121,126 @@ function New-KeepitUser {
         }
         $Role = $canonicalRole
 
-        # Step 3: Generate 16-character random password
+        # Step 3: Generate 16-character random password using cryptographic RNG
         $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^*'
-        $passwordChars = 1..16 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] }
+        $rngBytes = [byte[]]::new(16)
+        [System.Security.Cryptography.RandomNumberGenerator]::Fill($rngBytes)
+        $passwordChars = $rngBytes | ForEach-Object { $chars[$_ % $chars.Length] }
         $password = -join $passwordChars
         Write-Verbose "Generated random password (16 chars)"
 
         # Step 4: Create user token via POST
-        $escapedRole = [System.Security.SecurityElement]::Escape($Role)
-        $escapedName = [System.Security.SecurityElement]::Escape($Name)
-        $escapedEmail = [System.Security.SecurityElement]::Escape($Email)
-        $escapedPassword = [System.Security.SecurityElement]::Escape($password)
+        if ($PSCmdlet.ShouldProcess($Email, 'Create user')) {
+            $escapedRole = [System.Security.SecurityElement]::Escape($Role)
+            $escapedName = [System.Security.SecurityElement]::Escape($Name)
+            $escapedEmail = [System.Security.SecurityElement]::Escape($Email)
+            $escapedPassword = [System.Security.SecurityElement]::Escape($password)
 
-        $tokenXml = "<token><acl>$escapedRole</acl><descr>$escapedName</descr><aname>$escapedEmail</aname><apass>$escapedPassword</apass><primary>true</primary></token>"
+            $tokenXml = "<token><acl>$escapedRole</acl><descr>$escapedName</descr><aname>$escapedEmail</aname><apass>$escapedPassword</apass><primary>true</primary></token>"
 
-        $createUri = "$baseUrl/users/$userId/tokens/"
-        Write-Verbose "Creating user token: POST $createUri"
-        Write-Verbose "Request body: $tokenXml"
+            $createUri = "$baseUrl/users/$userId/tokens/"
+            Write-Verbose "Creating user token: POST $createUri"
+            Write-Verbose "Request body: $($tokenXml -replace '<apass>[^<]*</apass>', '<apass>***</apass>')"
 
-        $createResponse = Invoke-WebRequest -Uri $createUri -Method Post -Headers $headers -Body $tokenXml -SkipHttpErrorCheck
-        Write-Verbose "Create token response: HTTP $($createResponse.StatusCode)"
-        if ($createResponse.StatusCode -eq 409) {
-            throw "User '$Email' already exists."
-        }
-        elseif ($createResponse.StatusCode -ge 400) {
-            Write-Verbose "Response body: $($createResponse.Content)"
-            throw "Failed to create user token: HTTP $($createResponse.StatusCode) $($createResponse.StatusDescription) - $($createResponse.Content)"
-        }
-
-        Write-Verbose "User token created successfully"
-
-        # Step 5: Send activation email if requested
-        $activationSent = $false
-        if ($SendActivationEmail) {
-            $activateUri = "$baseUrl/users/$userId/activate"
-            $activateXml = "<activate><token>$escapedEmail</token></activate>"
-            Write-Verbose "Sending activation email: POST $activateUri"
-            Invoke-RestMethod -Uri $activateUri -Method Post -Headers $headers -Body $activateXml -ErrorAction Stop | Out-Null
-            $activationSent = $true
-            Write-Verbose "Activation email sent"
-        }
-
-        # Step 6: Enable notifications if requested
-        $notificationsSet = $false
-        if ($NotificationsEnabled) {
-            $notifyUri = "$baseUrl/users/$userId/tokens/$([System.Uri]::EscapeDataString($Email))/attributes/enable-notification"
-            Write-Verbose "Enabling notifications: POST $notifyUri"
-            Invoke-RestMethod -Uri $notifyUri -Method Post -Headers $headers -ErrorAction Stop | Out-Null
-            $notificationsSet = $true
-            Write-Verbose "Notifications enabled"
-        }
-
-        # Step 7: Grant connector access
-        $connectorGuids = @()
-        if ($Connectors.Count -eq 1 -and $Connectors[0] -eq 'all') {
-            Write-Verbose "Resolving all connectors"
-            $allConnectors = Get-KeepitConnector
-            if ($allConnectors) {
-                $connectorGuids = @($allConnectors | ForEach-Object { $_.ConnectorGuid })
+            $createResponse = Invoke-WebRequest -Uri $createUri -Method Post -Headers $headers -Body $tokenXml -SkipHttpErrorCheck
+            Write-Verbose "Create token response: HTTP $($createResponse.StatusCode)"
+            if ($createResponse.StatusCode -eq 409) {
+                throw "User '$Email' already exists."
             }
-        }
-        else {
-            foreach ($conn in $Connectors) {
+            elseif ($createResponse.StatusCode -ge 400) {
+                Write-Verbose "Response body: $($createResponse.Content)"
+                throw "Failed to create user token: HTTP $($createResponse.StatusCode) $($createResponse.StatusDescription) - $($createResponse.Content)"
+            }
+
+            Write-Verbose "User token created successfully"
+            $password = $null
+
+            # Step 5: Send activation email if requested
+            $activationSent = $false
+            if ($SendActivationEmail) {
                 try {
-                    $resolved = Resolve-KeepitConnectorIdentity -Identity $conn
-                    $connectorGuids += $resolved.ConnectorGuid
+                    $activateUri = "$baseUrl/users/$userId/activate"
+                    $activateXml = "<activate><token>$escapedEmail</token></activate>"
+                    Write-Verbose "Sending activation email: POST $activateUri"
+                    Invoke-RestMethod -Uri $activateUri -Method Post -Headers $headers -Body $activateXml -ErrorAction Stop | Out-Null
+                    $activationSent = $true
+                    Write-Verbose "Activation email sent"
                 }
                 catch {
-                    Write-Error "Failed to resolve connector '$conn': $($_.Exception.Message)"
+                    Write-Warning "Failed to send activation email for '$Email': $($_.Exception.Message)"
+                    $activationSent = $false
                 }
             }
-        }
 
-        Write-Verbose "Granting access to $($connectorGuids.Count) connector(s)"
-
-        $grantedCount = 0
-        $accessXml = "<member><aname>$escapedEmail</aname></member>"
-
-        foreach ($guid in $connectorGuids) {
-            $accessUri = "$baseUrl/users/$userId/devices/$guid/access_list"
-            Write-Verbose "Granting access: POST $accessUri"
-            try {
-                Invoke-RestMethod -Uri $accessUri -Method Post -Headers $headers -Body $accessXml -ErrorAction Stop | Out-Null
-                $grantedCount++
+            # Step 6: Enable notifications if requested
+            $notificationsSet = $false
+            if ($NotificationsEnabled) {
+                try {
+                    $notifyUri = "$baseUrl/users/$userId/tokens/$([System.Uri]::EscapeDataString($Email))/attributes/enable-notification"
+                    Write-Verbose "Enabling notifications: POST $notifyUri"
+                    Invoke-RestMethod -Uri $notifyUri -Method Post -Headers $headers -ErrorAction Stop | Out-Null
+                    $notificationsSet = $true
+                    Write-Verbose "Notifications enabled"
+                }
+                catch {
+                    Write-Warning "Failed to enable notifications for '$Email': $($_.Exception.Message)"
+                    $notificationsSet = $false
+                }
             }
-            catch {
-                Write-Error "Failed to grant access to connector '$guid': $($_.Exception.Message)"
+
+            # Step 7: Grant connector access
+            $connectorGuids = @()
+            if ($Connectors.Count -eq 1 -and $Connectors[0] -eq 'all') {
+                Write-Verbose "Resolving all connectors"
+                $allConnectors = Get-KeepitConnector
+                if ($allConnectors) {
+                    $connectorGuids = @($allConnectors | ForEach-Object { $_.ConnectorGuid })
+                }
             }
-        }
+            else {
+                foreach ($conn in $Connectors) {
+                    try {
+                        $resolved = Resolve-KeepitConnectorIdentity -Identity $conn
+                        $connectorGuids += $resolved.ConnectorGuid
+                    }
+                    catch {
+                        Write-Warning "Failed to resolve connector '$conn': $($_.Exception.Message)"
+                    }
+                }
+            }
 
-        Write-Verbose "Granted access to $grantedCount connector(s)"
+            Write-Verbose "Granting access to $($connectorGuids.Count) connector(s)"
 
-        # Return result
-        [PSCustomObject]@{
-            Email                = $Email
-            Name                 = $Name
-            Role                 = $Role
-            ConnectorsGranted    = $grantedCount
-            ActivationEmailSent  = $activationSent
-            NotificationsEnabled = $notificationsSet
+            $grantedCount = 0
+            $failedConnectors = @()
+            $accessXml = "<member><aname>$escapedEmail</aname></member>"
+
+            foreach ($guid in $connectorGuids) {
+                $accessUri = "$baseUrl/users/$userId/devices/$guid/access_list"
+                Write-Verbose "Granting access: POST $accessUri"
+                try {
+                    Invoke-RestMethod -Uri $accessUri -Method Post -Headers $headers -Body $accessXml -ErrorAction Stop | Out-Null
+                    $grantedCount++
+                }
+                catch {
+                    Write-Warning "Failed to grant access to connector '$guid': $($_.Exception.Message)"
+                    $failedConnectors += $guid
+                }
+            }
+
+            Write-Verbose "Granted access to $grantedCount connector(s)"
+
+            # Return result - always output even if secondary steps failed
+            [PSCustomObject]@{
+                Email                = $Email
+                Name                 = $Name
+                Role                 = $Role
+                ConnectorsGranted    = $grantedCount
+                ConnectorsRequested  = $connectorGuids.Count
+                ConnectorsFailed     = $failedConnectors.Count
+                ActivationEmailSent  = $activationSent
+                NotificationsEnabled = $notificationsSet
+            }
         }
     }
     catch {
@@ -228,7 +250,14 @@ function New-KeepitUser {
             $errorMessage -like "Invalid role '*'*") {
             throw
         }
-        throw "Failed to create user: $errorMessage"
+        $PSCmdlet.ThrowTerminatingError(
+            [System.Management.Automation.ErrorRecord]::new(
+                [System.Exception]::new("Failed to create user: $errorMessage", $_.Exception),
+                'KeepitUserError',
+                [System.Management.Automation.ErrorCategory]::ConnectionError,
+                $Email
+            )
+        )
     }
 }
 
@@ -259,6 +288,7 @@ function New-KeepitUser {
 #>
 function Remove-KeepitUser {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
@@ -283,6 +313,18 @@ function Remove-KeepitUser {
             'Authorization' = $authHeader
             'Content-Type'  = 'application/xml'
         }
+
+        # Verify user exists before prompting for confirmation
+        $checkUri = "$baseUrl/users/$userId/tokens?aname=$([System.Uri]::EscapeDataString($Identity))"
+        Write-Verbose "Checking user existence: HEAD $checkUri"
+        $headResponse = Invoke-WebRequest -Uri $checkUri -Method Head -Headers $headers -SkipHttpErrorCheck
+        if ($headResponse.StatusCode -eq 202) {
+            throw "User '$Identity' not found."
+        }
+        elseif ($headResponse.StatusCode -ne 409) {
+            throw "Failed to check user existence: HTTP $($headResponse.StatusCode)"
+        }
+        Write-Verbose "User exists (409 Conflict); proceeding with removal"
 
         # Delete user token
         if ($PSCmdlet.ShouldProcess($Identity, "Remove Keepit user")) {
@@ -310,7 +352,14 @@ function Remove-KeepitUser {
             $errorMessage -like "User '*' not found*") {
             throw
         }
-        throw "Failed to remove user: $errorMessage"
+        $PSCmdlet.ThrowTerminatingError(
+            [System.Management.Automation.ErrorRecord]::new(
+                [System.Exception]::new("Failed to remove user: $errorMessage", $_.Exception),
+                'KeepitUserError',
+                [System.Management.Automation.ErrorCategory]::ConnectionError,
+                $Identity
+            )
+        )
     }
 }
 
@@ -333,6 +382,7 @@ function Remove-KeepitUser {
 #>
 function Get-KeepitUser {
     [CmdletBinding()]
+    [OutputType([PSCustomObject])]
     param()
 
     try {
@@ -342,7 +392,7 @@ function Get-KeepitUser {
 
         $headers = @{
             'Authorization' = $authHeader
-            'Accept'        = 'application/vnd.keepit.v1+xml'
+            'Accept'        = 'application/vnd.keepit.v4+xml'
         }
 
         $uri = "$baseUrl/users/$userId/tokens"
@@ -350,10 +400,14 @@ function Get-KeepitUser {
 
         [xml]$response = (Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop).Content
 
-        $tokenNodes = if ($response.tokens.token -is [System.Array]) {
-            $response.tokens.token
+        if ($response.tokens.token) {
+            $tokenNodes = if ($response.tokens.token -is [System.Array]) {
+                $response.tokens.token
+            } else {
+                @($response.tokens.token)
+            }
         } else {
-            @($response.tokens.token)
+            $tokenNodes = @()
         }
 
         foreach ($token in $tokenNodes) {
@@ -372,7 +426,14 @@ function Get-KeepitUser {
         }
     }
     catch {
-        throw "Failed to retrieve users: $($_.Exception.Message)"
+        $PSCmdlet.ThrowTerminatingError(
+            [System.Management.Automation.ErrorRecord]::new(
+                [System.Exception]::new("Failed to retrieve users: $($_.Exception.Message)", $_.Exception),
+                'KeepitUserError',
+                [System.Management.Automation.ErrorCategory]::ConnectionError,
+                $null
+            )
+        )
     }
 }
 
@@ -400,6 +461,7 @@ function Get-KeepitUser {
 #>
 function Get-KeepitRoles {
     [CmdletBinding()]
+    [OutputType([PSCustomObject])]
     param()
 
     try {
@@ -409,6 +471,7 @@ function Get-KeepitRoles {
 
         $headers = @{
             'Authorization' = $authHeader
+            'Accept'        = 'application/vnd.keepit.v4+xml'
         }
 
         $uri = "$baseUrl/users/$userId/permissions/roles/"
@@ -416,10 +479,14 @@ function Get-KeepitRoles {
 
         $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
 
-        $roleNodes = if ($response.roles.role -is [System.Array]) {
-            $response.roles.role
+        if ($response.roles.role) {
+            $roleNodes = if ($response.roles.role -is [System.Array]) {
+                $response.roles.role
+            } else {
+                @($response.roles.role)
+            }
         } else {
-            @($response.roles.role)
+            $roleNodes = @()
         }
 
         foreach ($role in $roleNodes) {
@@ -430,6 +497,13 @@ function Get-KeepitRoles {
         }
     }
     catch {
-        throw "Failed to retrieve roles: $($_.Exception.Message)"
+        $PSCmdlet.ThrowTerminatingError(
+            [System.Management.Automation.ErrorRecord]::new(
+                [System.Exception]::new("Failed to retrieve roles: $($_.Exception.Message)", $_.Exception),
+                'KeepitApiError',
+                [System.Management.Automation.ErrorCategory]::ConnectionError,
+                $null
+            )
+        )
     }
 }

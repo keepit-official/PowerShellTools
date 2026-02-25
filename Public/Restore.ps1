@@ -1,3 +1,8 @@
+# --- Restore job XML size constants ---
+$XmlOverheadPerItem = 400       # Approximate XML overhead bytes per restore item element
+$XmlBaseOverhead    = 13        # Base XML element overhead bytes (<Path></Path> tags)
+$MaxXmlBatchSize    = 61440     # Maximum XML batch size (60KB) for API submission
+
 <#
 .SYNOPSIS
     Submits a backup or restore job to a Keepit connector
@@ -51,7 +56,8 @@
     The API response is parsed to extract job details from either job or jobs.job structure.
 #>
 function Submit-KeepitJob {
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
         [ValidateNotNullOrEmpty()]
@@ -87,7 +93,7 @@ function Submit-KeepitJob {
             Write-Verbose "Base URL: $baseUrl, User ID: $userId"
         }
         catch {
-            throw "Failed to initialize: $($_.Exception.Message)"
+            throw
         }
     }
 
@@ -119,77 +125,80 @@ function Submit-KeepitJob {
             Write-Verbose "Request Body:`n$Configuration"
 
             # Make API call using Invoke-WebRequest for raw response handling
-            $webResponse = Invoke-WebRequest -Uri $uri -Method Post -Headers $headers -Body $Configuration -ErrorAction Stop
-            $rawContent = $webResponse.Content
+            if ($PSCmdlet.ShouldProcess("connector $connectorGuid", 'Submit job')) {
+                $webResponse = Invoke-WebRequest -Uri $uri -Method Post -Headers $headers -Body $Configuration -ErrorAction Stop
+                $rawContent = $webResponse.Content
 
-            Write-Verbose "=== API Response ==="
-            Write-Verbose "Status Code: $($webResponse.StatusCode)"
-            Write-Verbose "Content-Type: $($webResponse.Headers.'Content-Type')"
-            Write-Verbose "Response Body:`n$rawContent"
+                Write-Verbose "=== API Response ==="
+                Write-Verbose "Status Code: $($webResponse.StatusCode)"
+                Write-Verbose "Content-Type: $($webResponse.Headers.'Content-Type')"
+                Write-Verbose "Response Body:`n$rawContent"
 
-            # Parse response - try XML first (matching Bohr's applyDataCallback logic)
-            $jobGuid = $null
-            $status = 'created'
-            $createdAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
-            $estimatedItems = 0
+                # Parse response - try XML first (matching Bohr's applyDataCallback logic)
+                $jobGuid = $null
+                $status = 'created'
+                $createdAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+                $estimatedItems = 0
 
-            try {
-                $responseXml = [xml]$rawContent
+                try {
+                    $responseXml = [xml]$rawContent
 
-                # Check for job structure (matches Bohr: jsonData?.job)
-                if ($responseXml.job) {
-                    $job = $responseXml.job
-                    $jobGuid = if ($job.guid) { $job.guid } else { $null }
-                    $status = if ($job.status) { $job.status } else { 'created' }
-                    $createdAt = if ($job.created) { $job.created } else { $createdAt }
-                    if ($job.'estimated-items') {
-                        $estimatedItems = [int]$job.'estimated-items'
+                    # Check for job structure (matches Bohr: jsonData?.job)
+                    if ($responseXml.job) {
+                        $job = $responseXml.job
+                        $jobGuid = if ($job.guid) { $job.guid } else { $null }
+                        $status = if ($job.status) { $job.status } else { 'created' }
+                        $createdAt = if ($job.created) { $job.created } else { $createdAt }
+                        if ($job.'estimated-items') {
+                            $estimatedItems = [int]$job.'estimated-items'
+                        }
+                        Write-Verbose "Parsed job from response.job"
                     }
-                    Write-Verbose "Parsed job from response.job"
-                }
-                # Check for jobs.job structure (matches Bohr: jsonData?.jobs?.job)
-                elseif ($responseXml.jobs.job) {
-                    $jobNode = $responseXml.jobs.job
-                    # Handle array case
-                    $job = if ($jobNode -is [System.Array]) { $jobNode[0] } else { $jobNode }
-                    $jobGuid = if ($job.guid) { $job.guid } else { $null }
-                    $status = if ($job.status) { $job.status } else { 'created' }
-                    $createdAt = if ($job.created) { $job.created } else { $createdAt }
-                    if ($job.'estimated-items') {
-                        $estimatedItems = [int]$job.'estimated-items'
+                    # Check for jobs.job structure (matches Bohr: jsonData?.jobs?.job)
+                    elseif ($responseXml.jobs.job) {
+                        $jobNode = $responseXml.jobs.job
+                        # Handle array case
+                        $job = if ($jobNode -is [System.Array]) { $jobNode[0] } else { $jobNode }
+                        $jobGuid = if ($job.guid) { $job.guid } else { $null }
+                        $status = if ($job.status) { $job.status } else { 'created' }
+                        $createdAt = if ($job.created) { $job.created } else { $createdAt }
+                        if ($job.'estimated-items') {
+                            $estimatedItems = [int]$job.'estimated-items'
+                        }
+                        Write-Verbose "Parsed job from response.jobs.job"
                     }
-                    Write-Verbose "Parsed job from response.jobs.job"
+                    else {
+                        Write-Verbose "Could not find job or jobs.job in response, using defaults"
+                    }
                 }
-                else {
-                    Write-Verbose "Could not find job or jobs.job in response, using defaults"
+                catch {
+                    Write-Verbose "Could not parse response as XML: $($_.Exception.Message)"
                 }
-            }
-            catch {
-                Write-Verbose "Could not parse response as XML: $($_.Exception.Message)"
-            }
 
-            # If we still don't have a job GUID, generate a placeholder
-            if (-not $jobGuid) {
-                $jobGuid = "job-$(Get-Date -Format 'yyyyMMddHHmmss')"
-                Write-Verbose "Generated placeholder job GUID: $jobGuid"
+                # If we still don't have a job GUID, generate a placeholder
+                if (-not $jobGuid) {
+                    $jobGuid = "job-$($createdAt -replace '[^0-9]','')"
+                    Write-Warning "API did not return a job GUID. Using placeholder: $jobGuid"
+                }
+
+                # Create output object
+                $result = [PSCustomObject]@{
+                    JobGuid           = $jobGuid
+                    ConnectorGuid     = $connectorGuid
+                    Status            = $status
+                    CreatedAt         = $createdAt
+                    EstimatedItems    = $estimatedItems
+                    IsPlaceholderGuid = ($jobGuid -like 'job-*')
+                }
+
+                Write-Verbose "=== Job Submitted Successfully ==="
+                Write-Verbose "JobGuid: $($result.JobGuid)"
+                Write-Verbose "Status: $($result.Status)"
+                Write-Verbose "CreatedAt: $($result.CreatedAt)"
+                Write-Verbose "EstimatedItems: $($result.EstimatedItems)"
+
+                $result
             }
-
-            # Create output object
-            $result = [PSCustomObject]@{
-                JobGuid        = $jobGuid
-                ConnectorGuid  = $connectorGuid
-                Status         = $status
-                CreatedAt      = $createdAt
-                EstimatedItems = $estimatedItems
-            }
-
-            Write-Verbose "=== Job Submitted Successfully ==="
-            Write-Verbose "JobGuid: $($result.JobGuid)"
-            Write-Verbose "Status: $($result.Status)"
-            Write-Verbose "CreatedAt: $($result.CreatedAt)"
-            Write-Verbose "EstimatedItems: $($result.EstimatedItems)"
-
-            $result
         }
         catch {
             # Handle HTTP errors
@@ -212,8 +221,20 @@ function Submit-KeepitJob {
                 }
             }
 
-            throw "Failed to submit job for connector $connectorGuid : $errorMessage"
+            $connectorIdentifier = if ($connectorGuid) { $connectorGuid } else { $Connector }
+            $PSCmdlet.ThrowTerminatingError(
+                [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new("Failed to submit job for connector $connectorIdentifier : $errorMessage", $_.Exception),
+                    'KeepitJobError',
+                    [System.Management.Automation.ErrorCategory]::ConnectionError,
+                    $connectorIdentifier
+                )
+            )
         }
+    }
+
+    end {
+        Write-Verbose "Submit-KeepitJob completed"
     }
 }
 
@@ -239,19 +260,14 @@ function Get-RestoreItemsXmlSize {
         [array]$Items
     )
 
-    # Static XML overhead (job wrapper, description, config elements, etc.)
-    # This is approximately 400 characters for the XML structure
-    $staticOverhead = 400
-
-    # Calculate the size of path elements
-    # Each path element is: <Path>/path/to/item</Path> = 13 chars + path length
+    # Calculate the size of path elements in bytes (UTF-8)
     $pathElementsSize = 0
     foreach ($item in $Items) {
         $itemPath = $item.Id -replace '^kng://[^/]+', ''
-        $pathElementsSize += 13 + $itemPath.Length  # <Path></Path> = 13 chars
+        $pathElementsSize += $XmlBaseOverhead + [System.Text.Encoding]::UTF8.GetByteCount($itemPath)
     }
 
-    return $staticOverhead + $pathElementsSize
+    return $XmlOverheadPerItem + $pathElementsSize
 }
 
 <#
@@ -271,33 +287,30 @@ function Get-RestoreItemsXmlSize {
 #>
 function Split-RestoreItemsBatches {
     [CmdletBinding()]
-    [OutputType([array])]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true)]
         [ValidateNotNull()]
         [array]$Items,
 
         [Parameter(Mandatory = $false)]
-        [int]$MaxSizeBytes = 61440  # 60KB
+        [int]$MaxSizeBytes = $MaxXmlBatchSize
     )
-
-    # Static XML overhead
-    $staticOverhead = 400
 
     $batches = [System.Collections.ArrayList]::new()
     $currentBatch = [System.Collections.ArrayList]::new()
-    $currentSize = $staticOverhead
+    $currentSize = $XmlOverheadPerItem
 
     foreach ($item in $Items) {
         $itemPath = $item.Id -replace '^kng://[^/]+', ''
-        $itemSize = 13 + $itemPath.Length  # <Path></Path> = 13 chars
+        $itemSize = $XmlBaseOverhead + [System.Text.Encoding]::UTF8.GetByteCount($itemPath)
 
         # Check if adding this item would exceed the limit
         if (($currentSize + $itemSize) -gt $MaxSizeBytes -and $currentBatch.Count -gt 0) {
             # Save current batch and start a new one
             [void]$batches.Add($currentBatch.ToArray())
             $currentBatch = [System.Collections.ArrayList]::new()
-            $currentSize = $staticOverhead
+            $currentSize = $XmlOverheadPerItem
         }
 
         [void]$currentBatch.Add($item)
@@ -362,7 +375,8 @@ function New-RestoreJobXml {
     # Strip kng://connector-guid prefix from item ID to get just the path
     $pathElements = ($Items | ForEach-Object {
         $itemPath = $_.Id -replace '^kng://[^/]+', ''
-        "<Path>$itemPath</Path>"
+        $escapedPath = [System.Security.SecurityElement]::Escape($itemPath)
+        "<Path>$escapedPath</Path>"
     }) -join ''
 
     # Generate the XML job configuration
@@ -371,6 +385,116 @@ function New-RestoreJobXml {
 "@
 
     return $xmlConfig
+}
+
+<#
+.SYNOPSIS
+    Resolves snapshots and creates batched restore job plans for grouped items
+.DESCRIPTION
+    Internal helper that, for each timestamp group in the supplied hashtable, resolves
+    the matching snapshot and splits items into batches respecting the XML size limit.
+    Returns an array of plan objects that both the WhatIf and normal execution paths consume.
+.PARAMETER ItemsByTimestamp
+    Hashtable keyed by updated-timestamp, each value an ArrayList of search-result items.
+.PARAMETER ConnectorGuid
+    The resolved connector GUID used for snapshot lookups.
+.PARAMETER Type
+    The item type (email, user, OneDrive) used for XML generation.
+.OUTPUTS
+    Array of PSCustomObjects with properties:
+        - Timestamp   : The original updated timestamp string
+        - SnapshotId  : The resolved snapshot ID
+        - Batches     : Array of item arrays (one per batch)
+        - BatchCount  : Number of batches
+        - ItemCount   : Total items in this timestamp group
+        - XmlConfigs  : Array of XML config strings (one per batch)
+.NOTES
+    This is an internal helper function not exported from the module.
+#>
+function Resolve-RestoreJobPlan {
+    [CmdletBinding()]
+    [OutputType([PSCustomObject[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$ItemsByTimestamp,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ConnectorGuid,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('email', 'user', 'OneDrive')]
+        [string]$Type
+    )
+
+    $plans = [System.Collections.ArrayList]::new()
+
+    foreach ($timestamp in $ItemsByTimestamp.Keys) {
+        $items = $ItemsByTimestamp[$timestamp]
+
+        # Parse the timestamp and search backwards to find snapshot at or before this time
+        try {
+            $snapshotTime = [DateTime]::Parse(
+                $timestamp,
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::RoundtripKind
+            )
+        }
+        catch {
+            Write-Warning "Could not parse timestamp '$timestamp', skipping group"
+            continue
+        }
+
+        $snapshotParams = @{
+            Connector  = $ConnectorGuid
+            StartTime  = $snapshotTime
+            EndTime    = $snapshotTime.AddYears(-1)
+            Reverse    = $true
+            ResultSize = 1
+        }
+
+        $snapshot = Get-KeepitSnapshot @snapshotParams | Select-Object -First 1
+
+        if (-not $snapshot) {
+            Write-Warning "Could not find snapshot for timestamp '$timestamp', skipping group"
+            continue
+        }
+
+        $snapshotId = $snapshot.Id
+        Write-Verbose "Found snapshot ID: $snapshotId for timestamp: $timestamp"
+
+        # Determine batching
+        $estimatedSize = Get-RestoreItemsXmlSize -Items $items
+        Write-Verbose "Estimated XML size for $($items.Count) items: $estimatedSize bytes"
+
+        if ($estimatedSize -gt $MaxXmlBatchSize) {
+            $batches = Split-RestoreItemsBatches -Items $items -MaxSizeBytes $MaxXmlBatchSize
+            $batchCount = $batches.Count
+            $avgItemSize = [math]::Round($estimatedSize / $items.Count, 1)
+            Write-Verbose "Items exceed $MaxXmlBatchSize bytes - splitting into $batchCount batches (avg item size: $avgItemSize bytes)"
+        }
+        else {
+            $batches = @(, $items)
+            $batchCount = 1
+        }
+
+        # Generate XML for each batch
+        $xmlConfigs = [System.Collections.ArrayList]::new()
+        foreach ($batch in $batches) {
+            $xmlConfig = New-RestoreJobXml -Type $Type -SnapshotId $snapshotId -Items $batch
+            [void]$xmlConfigs.Add($xmlConfig)
+        }
+
+        [void]$plans.Add([PSCustomObject]@{
+            Timestamp  = $timestamp
+            SnapshotId = $snapshotId
+            Batches    = $batches
+            BatchCount = $batchCount
+            ItemCount  = $items.Count
+            XmlConfigs = $xmlConfigs.ToArray()
+        })
+    }
+
+    return , $plans.ToArray()
 }
 
 <#
@@ -442,6 +566,7 @@ function New-RestoreJobXml {
 #>
 function Restore-KeepitBulkDeletedItems {
     [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
         [ValidateNotNullOrEmpty()]
@@ -485,22 +610,21 @@ function Restore-KeepitBulkDeletedItems {
             throw "EndTime cannot be before StartTime. StartTime: $($StartTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)), EndTime: $($EndTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture))"
         }
 
-        # Handle same-day search - expand to full day
+        # Normalize date range into local variables to avoid mutating the original parameters
         if ($StartTime.Date -eq $EndTime.Date) {
             Write-Verbose "StartTime and EndTime are the same date - expanding to full day"
-            $StartTime = $StartTime.Date  # Midnight start
-            $EndTime = $EndTime.Date.AddDays(1).AddSeconds(-1)  # 23:59:59
-            Write-Verbose "Expanded range: $($StartTime.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)) to $($EndTime.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture))"
+            $normalizedStartTime = $StartTime.Date  # Midnight start
+            $normalizedEndTime = $EndTime.Date.AddDays(1).AddSeconds(-1)  # 23:59:59
+            Write-Verbose "Expanded range: $($normalizedStartTime.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)) to $($normalizedEndTime.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture))"
+        }
+        else {
+            $normalizedStartTime = $StartTime
+            $normalizedEndTime = $EndTime
         }
 
         # Warn about RestorePath not being implemented
         if ($RestorePath) {
             Write-Warning "RestorePath parameter is not yet implemented. Items will be restored in-place to their original location."
-        }
-
-        # Validate Type; for now we only support email, ODB, and user
-        if ($Type -notin @('email', 'user', 'OneDrive')) {
-            throw "Only 'email', 'OneDrive', and 'user' types are currently supported. "
         }
 
         # Get authentication header and base URL
@@ -511,7 +635,7 @@ function Restore-KeepitBulkDeletedItems {
             Write-Verbose "Base URL: $baseUrl, User ID: $userId"
         }
         catch {
-            throw "Failed to initialize: $($_.Exception.Message)"
+            throw
         }
     }
 
@@ -569,8 +693,8 @@ function Restore-KeepitBulkDeletedItems {
                 RootPath    = $pathRoot
                 DeletedOnly = $true
                 ResultSize  = 'Unlimited'
-                StartTime   = $StartTime
-                EndTime     = $EndTime
+                StartTime   = $normalizedStartTime
+                EndTime     = $normalizedEndTime
             }
             if ($Type -eq 'user') {
                 $searchParams.Recursive = $false
@@ -633,7 +757,6 @@ function Restore-KeepitBulkDeletedItems {
 
             # Step 5: Handle WhatIf
             if ($WhatIfPreference) {
-                $maxSizeBytes = 61440  # 60KB threshold
                 $itemCounts = @{}
                 $batchCounts = @{}
                 $totalJobCount = 0
@@ -644,8 +767,8 @@ function Restore-KeepitBulkDeletedItems {
 
                     # Calculate if batching would be needed
                     $estimatedSize = Get-RestoreItemsXmlSize -Items $groupItems
-                    if ($estimatedSize -gt $maxSizeBytes) {
-                        $batches = Split-RestoreItemsBatches -Items $groupItems -MaxSizeBytes $maxSizeBytes
+                    if ($estimatedSize -gt $MaxXmlBatchSize) {
+                        $batches = Split-RestoreItemsBatches -Items $groupItems -MaxSizeBytes $MaxXmlBatchSize
                         $batchCounts[$key] = $batches.Count
                         $totalJobCount += $batches.Count
                     } else {
@@ -681,7 +804,7 @@ function Restore-KeepitBulkDeletedItems {
 
                         # Find the matching snapshot
                         try {
-                            $snapshotTime = [DateTime]::Parse($timestamp)
+                            $snapshotTime = [DateTime]::Parse($timestamp, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
                         }
                         catch {
                             Write-Warning "Could not parse timestamp '$timestamp', skipping group"
@@ -708,8 +831,8 @@ function Restore-KeepitBulkDeletedItems {
 
                         # Check if batching is needed and generate XML for each batch
                         $estimatedSize = Get-RestoreItemsXmlSize -Items $items
-                        if ($estimatedSize -gt $maxSizeBytes) {
-                            $batches = Split-RestoreItemsBatches -Items $items -MaxSizeBytes $maxSizeBytes
+                        if ($estimatedSize -gt $MaxXmlBatchSize) {
+                            $batches = Split-RestoreItemsBatches -Items $items -MaxSizeBytes $MaxXmlBatchSize
                             $batchIndex = 0
                             foreach ($batch in $batches) {
                                 $batchIndex++
@@ -740,7 +863,7 @@ function Restore-KeepitBulkDeletedItems {
                 # Find the matching snapshot
                 # Parse the timestamp and search backwards to find snapshot at or before this time
                 try {
-                    $snapshotTime = [DateTime]::Parse($timestamp)
+                    $snapshotTime = [DateTime]::Parse($timestamp, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
                 }
                 catch {
                     Write-Warning "Could not parse timestamp '$timestamp', skipping group"
@@ -766,16 +889,15 @@ function Restore-KeepitBulkDeletedItems {
                 Write-Verbose "Found snapshot ID: $snapshotId"
 
                 # Step 7: Check if items need to be batched due to XML size limits
-                $maxSizeBytes = 61440  # 60KB threshold
                 $estimatedSize = Get-RestoreItemsXmlSize -Items $items
                 Write-Verbose "Estimated XML size for $($items.Count) items: $estimatedSize bytes"
 
-                if ($estimatedSize -gt $maxSizeBytes) {
+                if ($estimatedSize -gt $MaxXmlBatchSize) {
                     # Split items into batches
-                    $batches = Split-RestoreItemsBatches -Items $items -MaxSizeBytes $maxSizeBytes
+                    $batches = Split-RestoreItemsBatches -Items $items -MaxSizeBytes $MaxXmlBatchSize
                     $batchCount = $batches.Count
                     $avgItemSize = [math]::Round($estimatedSize / $items.Count, 1)
-                    Write-Verbose "Items exceed $maxSizeBytes bytes - splitting into $batchCount batches (avg item size: $avgItemSize bytes)"
+                    Write-Verbose "Items exceed $MaxXmlBatchSize bytes - splitting into $batchCount batches (avg item size: $avgItemSize bytes)"
                 } else {
                     # Single batch with all items
                     $batches = @(, $items)
@@ -797,13 +919,6 @@ function Restore-KeepitBulkDeletedItems {
                     # Show XML blob if ShowJobs is specified
                     if ($ShowJobs) {
                         Write-Host "`nJob XML for snapshot ${timestamp}${batchLabel}:" -ForegroundColor Cyan
-                        Write-Host $xmlConfig -ForegroundColor Yellow
-                        Write-Host ""
-                    }
-
-                    # Show XML configuration with -WhatIf
-                    if ($WhatIfPreference) {
-                        Write-Host "`nRestore job XML that would be submitted${batchLabel}:" -ForegroundColor Cyan
                         Write-Host $xmlConfig -ForegroundColor Yellow
                         Write-Host ""
                     }
@@ -843,8 +958,20 @@ function Restore-KeepitBulkDeletedItems {
             $jobResults.ToArray()
         }
         catch {
-            throw "Failed to restore deleted items: $($_.Exception.Message)"
+            $connectorIdentifier = if ($connectorGuid) { $connectorGuid } else { $Connector }
+            $PSCmdlet.ThrowTerminatingError(
+                [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new("Failed to restore deleted items: $($_.Exception.Message)", $_.Exception),
+                    'KeepitRestoreError',
+                    [System.Management.Automation.ErrorCategory]::ConnectionError,
+                    $connectorIdentifier
+                )
+            )
         }
+    }
+
+    end {
+        Write-Verbose "Restore-KeepitBulkDeletedItems completed"
     }
 }
 
@@ -897,6 +1024,7 @@ function Restore-KeepitBulkDeletedItems {
 #>
 function Convert-KeepitUPNToGuid {
     [CmdletBinding()]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [ValidateNotNullOrEmpty()]
@@ -912,24 +1040,25 @@ function Convert-KeepitUPNToGuid {
     begin {
         Write-Verbose "Convert-KeepitUPNToGuid: Initializing"
 
-        # Resolve connector identity and get auth info once for all pipeline items
+        # Get auth info once for all pipeline items (connector resolved per-item in process block)
         try {
-            $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
-            $connectorGuid = $resolved.ConnectorGuid
-            Write-Verbose "Connector: $($resolved.Name) ($connectorGuid)"
-
             $authHeader = Get-AuthHeader
             $baseUrl = Get-KeepitBaseUrl
             $userId = Get-KeepitUserId -AuthHeader $authHeader -BaseUrl $baseUrl
             Write-Verbose "Base URL: $baseUrl, User ID: $userId"
         }
         catch {
-            throw "Failed to initialize: $($_.Exception.Message)"
+            throw
         }
     }
 
     process {
         try {
+            # Resolve connector per pipeline item so different ConnectorGuid values are handled
+            $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $connectorGuid = $resolved.ConnectorGuid
+            Write-Verbose "Connector: $($resolved.Name) ($connectorGuid)"
+
             Write-Verbose "Looking up GUID for UPN: $UserPrincipalName in connector: $connectorGuid"
 
             # Build bsearch query parameters matching Bohr's implementation
@@ -998,8 +1127,20 @@ function Convert-KeepitUPNToGuid {
             }
         }
         catch {
-            throw "Failed to look up UPN '$UserPrincipalName' in connector '$connectorGuid': $($_.Exception.Message)"
+            $connectorIdentifier = if ($connectorGuid) { $connectorGuid } else { $Connector }
+            $PSCmdlet.ThrowTerminatingError(
+                [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new("Failed to look up UPN '$UserPrincipalName' in connector '$connectorIdentifier': $($_.Exception.Message)", $_.Exception),
+                    'KeepitApiError',
+                    [System.Management.Automation.ErrorCategory]::ObjectNotFound,
+                    $UserPrincipalName
+                )
+            )
         }
+    }
+
+    end {
+        Write-Verbose "Convert-KeepitUPNToGuid completed"
     }
 }
 
@@ -1049,6 +1190,7 @@ function Convert-KeepitUPNToGuid {
 #>
 function Convert-KeepitGuidToUPN {
     [CmdletBinding()]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true, Position = 0,
             ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
@@ -1065,68 +1207,86 @@ function Convert-KeepitGuidToUPN {
     begin {
         Write-Verbose "Convert-KeepitGuidToUPN: Initializing"
 
-        # Resolve connector identity and build the GUID -> UPN lookup table.
-        # Two BSearch calls cover active users and users previously removed from backup.
-        $guidToUpnMap = [System.Collections.Generic.Dictionary[string, string]]::new(
-            [System.StringComparer]::OrdinalIgnoreCase
-        )
+        # Lookup table is built per-connector in process; cache connector GUID to avoid
+        # rebuilding when successive pipeline items share the same connector.
+        $guidToUpnMap = $null
+        $lastConnectorGuid = $null
+    }
 
+    process {
+        # Resolve connector per pipeline item to support multi-connector pipelines
         try {
-            $resolved     = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $resolved      = Resolve-KeepitConnectorIdentity -Identity $Connector
             $connectorGuid = $resolved.ConnectorGuid
             Write-Verbose "Connector: $($resolved.Name) ($connectorGuid)"
         }
         catch {
-            throw "Failed to resolve connector '$Connector': $($_.Exception.Message)"
-        }
-
-        # Active users
-        try {
-            $activeUsers = @(
-                Search-KeepitSnapshot -Connector $connectorGuid `
-                    -RootPath '/Users' `
-                    -ResultSize Unlimited `
-                    -WarningAction SilentlyContinue `
-                    -ErrorAction Stop
+            $PSCmdlet.ThrowTerminatingError(
+                [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new("Failed to resolve connector '$Connector': $($_.Exception.Message)", $_.Exception),
+                    'KeepitApiError',
+                    [System.Management.Automation.ErrorCategory]::ObjectNotFound,
+                    $Connector
+                )
             )
-            foreach ($u in $activeUsers) {
-                if (-not [string]::IsNullOrWhiteSpace($u.Name)) {
-                    $guidToUpnMap[$u.Name] = $u.Title
-                }
-            }
-            Write-Verbose "Loaded $($activeUsers.Count) active user entry/entries"
-        }
-        catch {
-            Write-Warning "Could not fetch active user list: $($_.Exception.Message)"
         }
 
-        # Deleted users (previously backed up, since removed from connector)
-        try {
-            $deletedUsers = @(
-                Search-KeepitSnapshot -Connector $connectorGuid `
-                    -RootPath '/Users' `
-                    -DeletedOnly `
-                    -ResultSize Unlimited `
-                    -WarningAction SilentlyContinue `
-                    -ErrorAction Stop
+        # Rebuild the GUID -> UPN lookup table when the connector changes
+        if ($connectorGuid -ne $lastConnectorGuid) {
+            $guidToUpnMap = [System.Collections.Generic.Dictionary[string, string]]::new(
+                [System.StringComparer]::OrdinalIgnoreCase
             )
-            foreach ($u in $deletedUsers) {
-                if (-not [string]::IsNullOrWhiteSpace($u.Name) -and
-                    -not $guidToUpnMap.ContainsKey($u.Name)) {
-                    $guidToUpnMap[$u.Name] = $u.Title
+            $lastConnectorGuid = $connectorGuid
+
+            # Active users
+            try {
+                $activeUsers = @(
+                    Search-KeepitSnapshot -Connector $connectorGuid `
+                        -RootPath '/Users' `
+                        -ResultSize Unlimited `
+                        -WarningAction SilentlyContinue `
+                        -ErrorAction Stop
+                )
+                foreach ($u in $activeUsers) {
+                    if (-not [string]::IsNullOrWhiteSpace($u.Name)) {
+                        $guidToUpnMap[$u.Name] = $u.Title
+                    }
                 }
+                Write-Verbose "Loaded $($activeUsers.Count) active user entry/entries"
             }
-            Write-Verbose "Loaded $($deletedUsers.Count) deleted user entry/entries"
-        }
-        catch {
-            Write-Warning "Could not fetch deleted user list (skipping): $($_.Exception.Message)"
+            catch {
+                Write-Warning "Could not fetch active user list: $($_.Exception.Message)"
+            }
+
+            # Deleted users (previously backed up, since removed from connector)
+            try {
+                $deletedUsers = @(
+                    Search-KeepitSnapshot -Connector $connectorGuid `
+                        -RootPath '/Users' `
+                        -DeletedOnly `
+                        -ResultSize Unlimited `
+                        -WarningAction SilentlyContinue `
+                        -ErrorAction Stop
+                )
+                foreach ($u in $deletedUsers) {
+                    if (-not [string]::IsNullOrWhiteSpace($u.Name) -and
+                        -not $guidToUpnMap.ContainsKey($u.Name)) {
+                        $guidToUpnMap[$u.Name] = $u.Title
+                    }
+                }
+                Write-Verbose "Loaded $($deletedUsers.Count) deleted user entry/entries"
+            }
+            catch {
+                Write-Warning "Could not fetch deleted user list (skipping): $($_.Exception.Message)"
+            }
+
+            Write-Verbose "GUID lookup table contains $($guidToUpnMap.Count) entry/entries"
         }
 
-        Write-Verbose "GUID lookup table contains $($guidToUpnMap.Count) entry/entries"
-    }
-
-    process {
-        # Normalise: convert path-masked double-dashes back to single dashes for lookup
+        # Normalise: convert path-masked double-dashes back to single dashes for lookup.
+        # This reverses the Keepit path-masking convention where single dashes in GUIDs
+        # are doubled (e.g. bf06910a--a25b--42ef becomes bf06910a-a25b-42ef). This is
+        # appropriate because GUIDs never contain legitimate double-dash sequences.
         $rawGuid = $Guid -replace '--', '-'
 
         $upn = $null
@@ -1142,4 +1302,512 @@ function Convert-KeepitGuidToUPN {
             UserPrincipalName = $upn
         }
     }
+
+    end {
+        Write-Verbose "Convert-KeepitGuidToUPN completed"
+    }
+}
+
+
+<#
+.SYNOPSIS
+    Performs an express restore of recent user data from Keepit backups
+.DESCRIPTION
+    Searches for items modified within a specified time window and submits restore jobs
+    to recover them. Items are grouped by snapshot timestamp and one restore job is submitted
+    per snapshot group. Jobs exceeding 60 KB of XML are automatically split into batches.
+
+    For Exchange workloads, the -PrioritizeCalendar switch creates separate calendar restore
+    jobs before processing other mail folders. The -InboxOnly switch restricts the mail restore
+    to the Inbox folder only.
+
+    Phase 1 supports the Exchange workload. OneDrive support is planned for Phase 2.
+.PARAMETER UserPrincipalName
+    The User Principal Name (UPN) of the target user whose data should be restored.
+    Accepts pipeline input by property name.
+    Aliases: UPN, Email, UserId
+.PARAMETER Connector
+    The connector name or GUID to use for the restore operation. Must be an M365 connector.
+    Can be piped from Get-KeepitConnector. Aliases: ConnectorGuid, Name
+.PARAMETER StartTime
+    The anchor time for the restore window. Items modified between (StartTime - Timespan) and
+    StartTime are restored. Defaults to the current time if omitted.
+.PARAMETER Timespan
+    Duration of the restore window. Accepts a PowerShell TimeSpan object or an ISO 8601 duration
+    string (e.g., "P7D" for 7 days, "P1M" for 1 month, "PT12H" for 12 hours).
+.PARAMETER Workload
+    The workload to restore. Currently supports "Exchange". "OneDrive" is planned for Phase 2.
+.PARAMETER PrioritizeCalendar
+    When specified with -Workload Exchange, creates separate restore jobs for the Calendar folder
+    first, then processes the remaining mail folders (excluding Calendar to avoid duplicates).
+.PARAMETER InboxOnly
+    When specified with -Workload Exchange, restricts the mail restore to the Inbox folder and
+    its subitems only. When not set, all mail folders under Outlook are restored (Inbox, Sent
+    Items, Drafts, etc.).
+.PARAMETER ShowJobs
+    When specified, prints the XML job configuration blob for each restore job.
+    Works with both -WhatIf and normal execution.
+.EXAMPLE
+    Start-KeepitExpressRestore -UserPrincipalName "user@example.com" -Connector "Production M365" -Workload Exchange -Timespan "P7D"
+
+    Restores all Exchange items modified in the last 7 days for the specified user
+.EXAMPLE
+    Start-KeepitExpressRestore -UPN "user@example.com" -Connector "Production M365" -Workload Exchange -Timespan ([TimeSpan]::FromDays(7)) -PrioritizeCalendar
+
+    Restores Calendar items first, then other mail items from the last 7 days
+.EXAMPLE
+    Import-Csv users.csv | Start-KeepitExpressRestore -Connector "abc123" -Workload Exchange -Timespan "P7D" -InboxOnly -WhatIf
+
+    Shows what would be restored from the Inbox for multiple users without submitting jobs
+.OUTPUTS
+    With -WhatIf: PSCustomObject with properties (jobs are NOT submitted):
+        - TotalItems: Total number of items that would be restored
+        - SnapshotGroups: Number of unique snapshot timestamp groups
+        - TotalJobCount: Number of restore jobs that would be created
+        - ItemsBySnapshot: Hashtable showing item counts per snapshot timestamp
+        - BatchesBySnapshot: Hashtable showing batch counts per snapshot timestamp
+
+    Without -WhatIf: Array of PSCustomObjects containing job results (jobs ARE submitted):
+        - JobGuid: The GUID of the created restore job
+        - ConnectorGuid: The connector GUID
+        - SnapshotId: The snapshot ID used for this restore
+        - SnapshotTime: The snapshot timestamp
+        - ItemCount: Number of items in this restore job
+        - BatchNumber: Batch number if split (null if single batch)
+        - TotalBatches: Total batches for this snapshot (null if single batch)
+        - Status: Job status
+        - CreatedAt: Timestamp when the job was created
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+    Items are restored in-place to their original location.
+    One restore job is created per unique snapshot timestamp to optimize the restore process.
+#>
+function Start-KeepitExpressRestore {
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('UPN', 'Email', 'UserId')]
+        [string]$UserPrincipalName,
+
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('ConnectorGuid', 'Name')]
+        [string]$Connector,
+
+        [Parameter(Mandatory = $false)]
+        [DateTime]$StartTime,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNull()]
+        $Timespan,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Exchange')]
+        [string]$Workload,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$PrioritizeCalendar,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$InboxOnly,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ShowJobs
+    )
+
+    begin {
+        Write-Verbose "=== Start-KeepitExpressRestore: Initialization ==="
+
+        # Default StartTime to now if not specified
+        if (-not $PSBoundParameters.ContainsKey('StartTime')) {
+            $StartTime = [DateTime]::UtcNow
+            Write-Verbose "StartTime not specified, using current time: $($StartTime.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture))"
+        }
+
+        # Parse Timespan: accept [TimeSpan] or ISO 8601 duration string
+        if ($Timespan -is [TimeSpan]) {
+            $resolvedTimespan = $Timespan
+        }
+        elseif ($Timespan -is [string]) {
+            try {
+                $resolvedTimespan = [System.Xml.XmlConvert]::ToTimeSpan($Timespan)
+            }
+            catch {
+                throw "Invalid ISO 8601 duration string '$Timespan'. Examples: P7D (7 days), P1M (1 month), PT12H (12 hours)."
+            }
+        }
+        else {
+            throw "Timespan must be a [TimeSpan] object or an ISO 8601 duration string. Got: $($Timespan.GetType().Name)"
+        }
+
+        if ($resolvedTimespan.TotalSeconds -le 0) {
+            throw "Timespan must be a positive duration."
+        }
+
+        # Calculate the search window
+        $searchEnd = $StartTime
+        $searchStart = $StartTime - $resolvedTimespan
+
+        Write-Verbose "Restore window: $($searchStart.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)) to $($searchEnd.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture))"
+
+        # Validate workload-specific switches
+        if ($PrioritizeCalendar -and $Workload -ne 'Exchange') {
+            throw "The -PrioritizeCalendar switch is only valid when -Workload is Exchange."
+        }
+        if ($InboxOnly -and $Workload -ne 'Exchange') {
+            throw "The -InboxOnly switch is only valid when -Workload is Exchange."
+        }
+
+        # Get authentication header and base URL
+        try {
+            $authHeader = Get-AuthHeader
+            $baseUrl = Get-KeepitBaseUrl
+            $userId = Get-KeepitUserId -AuthHeader $authHeader -BaseUrl $baseUrl
+            Write-Verbose "Base URL: $baseUrl, User ID: $userId"
+        }
+        catch {
+            throw
+        }
+    }
+
+    process {
+        try {
+            # Resolve connector identity to GUID
+            $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $connectorGuid = $resolved.ConnectorGuid
+
+            Write-Verbose "=== Start-KeepitExpressRestore: Processing ==="
+            Write-Verbose "UserPrincipalName: $UserPrincipalName"
+            Write-Verbose "Connector: $($resolved.Name) ($connectorGuid)"
+            Write-Verbose "Workload: $Workload"
+
+            # Convert UPN to GUID for path construction
+            $userGuid = $UserPrincipalName
+            if ($UserPrincipalName -match '@') {
+                Write-Verbose "Converting UPN to GUID..."
+                $guidResult = Convert-KeepitUPNToGuid -UserPrincipalName $UserPrincipalName -Connector $connectorGuid
+                if (-not $guidResult -or -not $guidResult.Guid) {
+                    throw "Failed to convert UPN '$UserPrincipalName' to GUID. User may not exist in the backup."
+                }
+                $userGuid = $guidResult.Guid
+                Write-Verbose "Converted UPN to GUID: $userGuid"
+            }
+
+            $jobResults = [System.Collections.ArrayList]::new()
+            $whatIfItems = [System.Collections.ArrayList]::new()
+
+            # --- Calendar priority pass ---
+            if ($PrioritizeCalendar) {
+                Write-Verbose "PrioritizeCalendar: Searching Calendar folder..."
+                $calendarPath = "/Users/$userGuid/Outlook/Calendar"
+
+                $calSearchParams = @{
+                    Connector       = $connectorGuid
+                    RootPath        = $calendarPath
+                    Recursive       = $true
+                    ResultSize      = 'Unlimited'
+                    ReceivedTime    = $searchStart
+                    ReceivedEndTime = $searchEnd
+                }
+
+                $calendarItems = @(Search-KeepitSnapshot @calSearchParams)
+                Write-Verbose "Found $($calendarItems.Count) calendar items"
+
+                if ($calendarItems.Count -gt 0) {
+                    $calResult = Submit-ExpressRestoreJobs `
+                        -Items $calendarItems `
+                        -ConnectorGuid $connectorGuid `
+                        -Label "Calendar" `
+                        -UserPrincipalName $UserPrincipalName `
+                        -ShowJobs:$ShowJobs `
+                        -PSCmdlet $PSCmdlet
+                    if ($WhatIfPreference) {
+                        [void]$whatIfItems.AddRange(@($calendarItems))
+                    }
+                    else {
+                        foreach ($r in $calResult) { [void]$jobResults.Add($r) }
+                    }
+                }
+                else {
+                    Write-Verbose "No calendar items found in the specified time window"
+                }
+            }
+
+            # --- Mail restore pass ---
+            # TODO: this will probably fail with localized folder names
+            Write-Verbose "Searching mail folders..."
+            if ($InboxOnly) {
+                $useRecursive = $false
+                $mailPath = "/Users/$userGuid/Outlook/Inbox"
+            }
+            else {
+                $mailPath = "/Users/$userGuid/Outlook"
+                $useRecursive = $true
+            }
+
+            $mailSearchParams = @{
+                Connector       = $connectorGuid
+                RootPath        = $mailPath
+                Recursive       = $useRecursive
+                ResultSize      = 'Unlimited'
+                ReceivedTime    = $searchStart
+                ReceivedEndTime = $searchEnd
+            }
+
+            $mailItems = @(Search-KeepitSnapshot @mailSearchParams)
+            Write-Verbose "Found $($mailItems.Count) mail items"
+
+            # Exclude Calendar items if they were already restored in the priority pass
+            if ($PrioritizeCalendar -and $mailItems.Count -gt 0) {
+                $calendarPathPrefix = "/Users/$userGuid/Outlook/Calendar"
+                $beforeCount = $mailItems.Count
+                $mailItems = @($mailItems | Where-Object {
+                    $itemPath = $_.Id -replace '^kng://[^/]+', ''
+                    $itemPath -notlike "$calendarPathPrefix*"
+                })
+                Write-Verbose "Excluded $($beforeCount - $mailItems.Count) calendar items from mail pass"
+            }
+
+            if ($mailItems.Count -gt 0) {
+                $mailLabel = if ($InboxOnly) { "Inbox" } else { "Mail" }
+                $mailResult = Submit-ExpressRestoreJobs `
+                    -Items $mailItems `
+                    -ConnectorGuid $connectorGuid `
+                    -Label $mailLabel `
+                    -UserPrincipalName $UserPrincipalName `
+                    -ShowJobs:$ShowJobs `
+                    -PSCmdlet $PSCmdlet
+                if ($WhatIfPreference) {
+                    [void]$whatIfItems.AddRange(@($mailItems))
+                }
+                else {
+                    foreach ($r in $mailResult) { [void]$jobResults.Add($r) }
+                }
+            }
+            else {
+                if ($WhatIfPreference) {
+                    Write-Verbose "No mail items found for user '$UserPrincipalName' in the specified time window."
+                }
+                else {
+                    Write-Warning "No mail items found for user '$UserPrincipalName' in the specified time window."
+                }
+            }
+
+            # --- Return results ---
+            if ($WhatIfPreference) {
+                $allItems = $whatIfItems.ToArray()
+                if ($allItems.Count -eq 0) {
+                    Write-Warning "No items found for user '$UserPrincipalName' in the specified time window."
+                    return
+                }
+
+                # Group all items by timestamp for the summary
+                $itemsByTimestamp = @{}
+                foreach ($item in $allItems) {
+                    $updated = $item.Updated
+                    if (-not $updated) { continue }
+                    if (-not $itemsByTimestamp.ContainsKey($updated)) {
+                        $itemsByTimestamp[$updated] = [System.Collections.ArrayList]::new()
+                    }
+                    [void]$itemsByTimestamp[$updated].Add($item)
+                }
+
+                $itemCounts = @{}
+                $batchCounts = @{}
+                $totalJobCount = 0
+
+                foreach ($key in $itemsByTimestamp.Keys) {
+                    $groupItems = $itemsByTimestamp[$key]
+                    $itemCounts[$key] = $groupItems.Count
+                    $estimatedSize = Get-RestoreItemsXmlSize -Items $groupItems
+                    if ($estimatedSize -gt $MaxXmlBatchSize) {
+                        $batches = Split-RestoreItemsBatches -Items $groupItems -MaxSizeBytes $MaxXmlBatchSize
+                        $batchCounts[$key] = $batches.Count
+                        $totalJobCount += $batches.Count
+                    }
+                    else {
+                        $batchCounts[$key] = 1
+                        $totalJobCount += 1
+                    }
+                }
+
+                $whatIfResult = [PSCustomObject]@{
+                    TotalItems        = $allItems.Count
+                    SnapshotGroups    = $itemsByTimestamp.Count
+                    TotalJobCount     = $totalJobCount
+                    ItemsBySnapshot   = $itemCounts
+                    BatchesBySnapshot = $batchCounts
+                }
+
+                Write-Host "WhatIf: Would restore $($allItems.Count) items in $totalJobCount restore job(s) across $($itemsByTimestamp.Count) snapshot group(s) for $UserPrincipalName"
+                foreach ($key in $itemsByTimestamp.Keys | Sort-Object) {
+                    $batchInfo = if ($batchCounts[$key] -gt 1) { " ($($batchCounts[$key]) batches due to size limit)" } else { "" }
+                    Write-Host "  Snapshot $key : $($itemsByTimestamp[$key].Count) items$batchInfo"
+                    foreach ($item in $itemsByTimestamp[$key]) {
+                        $title = if ($item.Title) { $item.Title } else { $item.Id }
+                        Write-Host "    + $title  [Updated: $($item.Updated)]"
+                    }
+                }
+
+                if ($ShowJobs) {
+                    Write-Host ""
+                    Write-Host "XML job configurations that would be submitted:"
+                    $plans = Resolve-RestoreJobPlan -ItemsByTimestamp $itemsByTimestamp -ConnectorGuid $connectorGuid -Type 'email'
+                    foreach ($plan in $plans) {
+                        $batchIndex = 0
+                        foreach ($xmlConfig in $plan.XmlConfigs) {
+                            $batchIndex++
+                            $batchLabel = if ($plan.BatchCount -gt 1) { " (batch $batchIndex of $($plan.BatchCount))" } else { "" }
+                            Write-Host ""
+                            Write-Host "Job XML for snapshot $($plan.Timestamp)$batchLabel :"
+                            $xmlConfig | Out-Host
+                        }
+                    }
+                }
+
+                return $whatIfResult
+            }
+
+            Write-Verbose "=== Start-KeepitExpressRestore: Complete ==="
+            Write-Verbose "Submitted $($jobResults.Count) restore jobs for $UserPrincipalName"
+
+            $jobResults.ToArray()
+        }
+        catch {
+            $connectorIdentifier = if ($connectorGuid) { $connectorGuid } else { $Connector }
+            $PSCmdlet.ThrowTerminatingError(
+                [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new("Failed to perform express restore: $($_.Exception.Message)", $_.Exception),
+                    'KeepitExpressRestoreError',
+                    [System.Management.Automation.ErrorCategory]::ConnectionError,
+                    $connectorIdentifier
+                )
+            )
+        }
+    }
+
+    end {
+        Write-Verbose "Start-KeepitExpressRestore completed"
+    }
+}
+
+
+<#
+.SYNOPSIS
+    Internal helper that groups items by timestamp, resolves snapshots, and submits restore jobs
+.DESCRIPTION
+    Groups items by their Updated timestamp, resolves each group to a snapshot, splits into
+    batches if needed, and submits jobs via Submit-KeepitJob. Returns job result objects.
+    Used by Start-KeepitExpressRestore to handle both the Calendar and Mail passes.
+.PARAMETER Items
+    Array of search result items from Search-KeepitSnapshot.
+.PARAMETER ConnectorGuid
+    The resolved connector GUID.
+.PARAMETER Label
+    A descriptive label for log output (e.g., "Calendar", "Mail", "Inbox").
+.PARAMETER UserPrincipalName
+    The UPN for logging purposes.
+.PARAMETER ShowJobs
+    When set, prints XML configuration for each job.
+.PARAMETER PSCmdlet
+    The calling cmdlet's $PSCmdlet for ShouldProcess support.
+.OUTPUTS
+    Array of PSCustomObjects with job result properties when not in WhatIf mode.
+    Returns nothing in WhatIf mode (caller handles WhatIf summary).
+.NOTES
+    This is an internal helper function not exported from the module.
+#>
+function Submit-ExpressRestoreJobs {
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([PSCustomObject[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [array]$Items,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ConnectorGuid,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label,
+
+        [Parameter(Mandatory = $true)]
+        [string]$UserPrincipalName,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ShowJobs,
+
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.PSCmdlet]$PSCmdlet
+    )
+
+    # Group items by updated timestamp
+    $itemsByTimestamp = @{}
+    foreach ($item in $Items) {
+        $updated = $item.Updated
+        if (-not $updated) {
+            Write-Verbose "Item $($item.Id) has no Updated timestamp, skipping"
+            continue
+        }
+        if (-not $itemsByTimestamp.ContainsKey($updated)) {
+            $itemsByTimestamp[$updated] = [System.Collections.ArrayList]::new()
+        }
+        [void]$itemsByTimestamp[$updated].Add($item)
+    }
+
+    Write-Verbose "${Label}: Grouped $($Items.Count) items into $($itemsByTimestamp.Count) snapshot groups"
+
+    # WhatIf mode: caller handles the summary, just return
+    if ($WhatIfPreference) {
+        return
+    }
+
+    # Resolve snapshots and create batched plans
+    $plans = Resolve-RestoreJobPlan -ItemsByTimestamp $itemsByTimestamp -ConnectorGuid $ConnectorGuid -Type 'email'
+
+    $jobResults = [System.Collections.ArrayList]::new()
+
+    foreach ($plan in $plans) {
+        $batchIndex = 0
+        foreach ($xmlConfig in $plan.XmlConfigs) {
+            $batchIndex++
+            $batch = $plan.Batches[$batchIndex - 1]
+            $batchLabel = if ($plan.BatchCount -gt 1) { " (batch $batchIndex of $($plan.BatchCount))" } else { "" }
+
+            Write-Verbose "${Label}: Submitting job for snapshot $($plan.Timestamp)$batchLabel - $($batch.Count) items"
+
+            if ($ShowJobs) {
+                Write-Host "`n$Label job XML for snapshot $($plan.Timestamp)$batchLabel :" -ForegroundColor Cyan
+                Write-Host $xmlConfig -ForegroundColor Yellow
+                Write-Host ""
+            }
+
+            if ($PSCmdlet.ShouldProcess("Connector $ConnectorGuid", "Submit $Label restore job for $($batch.Count) items from snapshot $($plan.Timestamp)$batchLabel")) {
+                $submitParams = @{
+                    Connector     = $ConnectorGuid
+                    Configuration = $xmlConfig
+                }
+
+                $jobResult = Submit-KeepitJob @submitParams
+
+                $enhancedResult = [PSCustomObject]@{
+                    JobGuid       = $jobResult.JobGuid
+                    ConnectorGuid = $jobResult.ConnectorGuid
+                    SnapshotId    = $plan.SnapshotId
+                    SnapshotTime  = $plan.Timestamp
+                    ItemCount     = $batch.Count
+                    BatchNumber   = if ($plan.BatchCount -gt 1) { $batchIndex } else { $null }
+                    TotalBatches  = if ($plan.BatchCount -gt 1) { $plan.BatchCount } else { $null }
+                    Status        = $jobResult.Status
+                    CreatedAt     = $jobResult.CreatedAt
+                }
+
+                [void]$jobResults.Add($enhancedResult)
+                Write-Verbose "${Label}: Submitted job $($jobResult.JobGuid)$batchLabel"
+            }
+        }
+    }
+
+    return , $jobResults.ToArray()
 }

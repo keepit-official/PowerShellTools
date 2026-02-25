@@ -106,37 +106,32 @@
 #>
 function Get-KeepitJobs {
     [CmdletBinding()]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
         [ValidateNotNullOrEmpty()]
         [Alias('ConnectorGuid', 'Name')]
         [string]$Connector,
 
-        [Parameter(Mandatory = $false)]
         [ValidateSet('backup', 'restore')]
         [string]$Type,
 
-        [Parameter(Mandatory = $false)]
         [DateTime]$StartTime,
 
-        [Parameter(Mandatory = $false)]
         [DateTime]$EndTime,
 
-        [Parameter(Mandatory = $false)]
         [switch]$Completed,
 
-        [Parameter(Mandatory = $false)]
         [switch]$Scheduled,
 
-        [Parameter(Mandatory = $false)]
         [switch]$Raw,
 
-        [Parameter(Mandatory = $false)]
         [switch]$ActiveOnly
     )
 
     begin {
         Write-Verbose "Get-KeepitJobs"
+        $totalJobsReturned = 0
 
         # Check if any status filters are specified
         $hasStatusFilter = $Completed -or $Scheduled
@@ -157,15 +152,17 @@ function Get-KeepitJobs {
         }
 
         if ($hasStartTime -and $hasEndTime) {
+            # Validate dates first - catch inverted ranges before same-day expansion
+            if ($StartTime -ge $EndTime -and $StartTime.Date -ne $EndTime.Date) {
+                throw "StartTime must be less than EndTime. StartTime: $StartTime, EndTime: $EndTime"
+            }
+
             # Handle same-day search - expand to full day
             if ($StartTime.Date -eq $EndTime.Date) {
                 Write-Verbose "StartTime and EndTime are the same date - expanding to full day"
                 $StartTime = $StartTime.Date  # Midnight start
                 $EndTime = $EndTime.Date.AddDays(1).AddSeconds(-1)  # 23:59:59
                 Write-Verbose "Expanded range: $($StartTime.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)) to $($EndTime.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture))"
-            }
-            elseif ($StartTime -ge $EndTime) {
-                throw "StartTime must be less than EndTime. StartTime: $StartTime, EndTime: $EndTime"
             }
 
             # Normalize times to UTC for consistent comparison with API times (which are UTC)
@@ -190,8 +187,7 @@ function Get-KeepitJobs {
         else {
             # No dates specified - default to showing active jobs and future jobs
             $useFutureFilter = $true
-            $currentTime = [DateTime]::UtcNow
-            Write-Verbose "No date range specified - filtering for active jobs and jobs scheduled in the future (after $currentTime)"
+            Write-Verbose "No date range specified - will filter for active jobs and jobs scheduled in the future"
         }
 
         # Get authentication header and base URL once for all pipeline items
@@ -205,12 +201,18 @@ function Get-KeepitJobs {
             Write-Verbose "Initialization completed successfully"
         }
         catch {
-            throw "Failed to initialize: $($_.Exception.Message)"
+            throw
         }
     }
 
     process {
         try {
+            # Capture current time fresh for each pipeline item
+            if ($useFutureFilter) {
+                $currentTime = [DateTime]::UtcNow
+                Write-Verbose "Current UTC time for future filter: $($currentTime.ToString('yyyy-MM-ddTHH:mm:ssZ'))"
+            }
+
             # Resolve connector identity to GUID
             $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
             $connectorGuid = $resolved.ConnectorGuid
@@ -232,6 +234,7 @@ function Get-KeepitJobs {
             $headers = @{
                 'Authorization' = $authHeader
                 'Content-Type' = 'application/xml'
+                'Accept' = 'application/vnd.keepit.v4+xml'
                 'active-jobs-only' = $activeJobsOnlyValue
             }
 
@@ -295,10 +298,10 @@ function Get-KeepitJobs {
                         # Use Start time if available, fall back to Scheduled time
                         $jobDateTime = $null
                         if ($job.start) {
-                            $jobDateTime = [DateTime]::Parse($job.start)
+                            $jobDateTime = [DateTime]::Parse($job.start, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
                         }
                         elseif ($job.scheduled) {
-                            $jobDateTime = [DateTime]::Parse($job.scheduled)
+                            $jobDateTime = [DateTime]::Parse($job.scheduled, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
                         }
 
                         if ($jobDateTime) {
@@ -324,10 +327,10 @@ function Get-KeepitJobs {
                     # Use Start time if available, fall back to Scheduled time
                     $jobDateTime = $null
                     if ($job.start) {
-                        $jobDateTime = [DateTime]::Parse($job.start)
+                        $jobDateTime = [DateTime]::Parse($job.start, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
                     }
                     elseif ($job.scheduled) {
-                        $jobDateTime = [DateTime]::Parse($job.scheduled)
+                        $jobDateTime = [DateTime]::Parse($job.scheduled, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
                     }
 
                     if ($jobDateTime) {
@@ -383,13 +386,74 @@ function Get-KeepitJobs {
                 }
 
                 Write-Verbose "Outputting job: $($jobObject.JobGuid) (Type: $($jobObject.Type), Active: $($jobObject.Active))"
+                $totalJobsReturned++
                 $jobObject
             }
 
             Write-Verbose "=== End Get-KeepitJobs ==="
         }
         catch {
-            throw "Failed to retrieve jobs for connector $connectorGuid : $($_.Exception.Message)"
+            $PSCmdlet.ThrowTerminatingError(
+                [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new("Failed to retrieve jobs for connector $connectorGuid : $($_.Exception.Message)", $_.Exception),
+                    'KeepitJobError',
+                    [System.Management.Automation.ErrorCategory]::ConnectionError,
+                    $connectorGuid
+                )
+            )
+        }
+    }
+
+    end {
+        Write-Verbose "Total jobs returned: $totalJobsReturned"
+    }
+}
+
+function Invoke-JobCancellation {
+    <#
+    .SYNOPSIS
+        Sends a cancellation request for a single job. Used internally by Stop-KeepitJob.
+    #>
+    param(
+        [string]$Uri,
+        [hashtable]$Headers,
+        [string]$ConnectorGuid,
+        [string]$ConnectorName,
+        [string]$JobGuid,
+        [string]$JobStatus
+    )
+
+    $timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+    $cancelXml = "<job><cancelled>$timestamp</cancelled></job>"
+
+    try {
+        Invoke-RestMethod -Uri $Uri -Method Put -Headers $Headers -Body $cancelXml -ErrorAction Stop | Out-Null
+        [PSCustomObject]@{
+            ConnectorGuid = $ConnectorGuid
+            ConnectorName = $ConnectorName
+            JobGuid       = $JobGuid
+            Status        = 'Cancelled'
+            CancelledAt   = $timestamp
+        }
+    }
+    catch {
+        $errorMessage = $_.Exception.Message
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+            try {
+                $errorXml = [xml]$_.ErrorDetails.Message
+                $errorMessage = "$($errorXml.error.code): $($errorXml.error.description)"
+            }
+            catch { }
+        }
+        # Return error info; let the caller decide whether to Write-Error or throw
+        [PSCustomObject]@{
+            ConnectorGuid = $ConnectorGuid
+            ConnectorName = $ConnectorName
+            JobGuid       = $JobGuid
+            Status        = "Error: $errorMessage"
+            CancelledAt   = $null
+            _Exception    = $_.Exception
+            _ErrorMessage = $errorMessage
         }
     }
 }
@@ -439,6 +503,7 @@ function Get-KeepitJobs {
 #>
 function Stop-KeepitJob {
     [CmdletBinding(SupportsShouldProcess = $true, DefaultParameterSetName = 'Single')]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true,
                    ParameterSetName = 'Single')]
@@ -467,7 +532,7 @@ function Stop-KeepitJob {
             Write-Verbose "Base URL: $baseUrl, User ID: $userId"
         }
         catch {
-            throw "Failed to initialize: $($_.Exception.Message)"
+            throw
         }
     }
 
@@ -482,8 +547,12 @@ function Stop-KeepitJob {
             if ($All) {
                 # Fetch active + scheduled jobs
                 $jobsToCancel = @()
-                try { $jobsToCancel += @(Get-KeepitJobs -Connector $connectorGuid -ActiveOnly) } catch { }
-                try { $jobsToCancel += @(Get-KeepitJobs -Connector $connectorGuid -Scheduled) } catch { }
+                try { $jobsToCancel += @(Get-KeepitJobs -Connector $connectorGuid -ActiveOnly) } catch {
+                    Write-Warning "Failed to retrieve active jobs for connector '$connectorName': $($_.Exception.Message)"
+                }
+                try { $jobsToCancel += @(Get-KeepitJobs -Connector $connectorGuid -Scheduled) } catch {
+                    Write-Warning "Failed to retrieve scheduled jobs for connector '$connectorName': $($_.Exception.Message)"
+                }
                 $jobsToCancel = $jobsToCancel | Where-Object { $_ -and $_.JobGuid }
 
                 if ($jobsToCancel.Count -eq 0) {
@@ -494,85 +563,96 @@ function Stop-KeepitJob {
                 Write-Verbose "Found $($jobsToCancel.Count) job(s) to cancel"
 
                 foreach ($job in $jobsToCancel) {
-                    $timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
-                    $cancelXml = "<job><cancelled>$timestamp</cancelled></job>"
                     $uri = "$baseUrl/users/$userId/devices/$connectorGuid/jobs/$($job.JobGuid)"
 
                     if ($PSCmdlet.ShouldProcess("$connectorName job $($job.JobGuid) ($($job.Type))", "Cancel")) {
                         $headers = @{
                             'Authorization' = $authHeader
                             'Content-Type'  = 'application/xml'
+                            'Accept'        = 'application/vnd.keepit.v4+xml'
                         }
-                        try {
-                            Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -Body $cancelXml -ErrorAction Stop | Out-Null
-                            [PSCustomObject]@{
-                                ConnectorGuid = $connectorGuid
-                                ConnectorName = $connectorName
-                                JobGuid       = $job.JobGuid
-                                Status        = 'Cancelled'
-                                CancelledAt   = $timestamp
-                            }
+                        $result = Invoke-JobCancellation -Uri $uri -Headers $headers `
+                            -ConnectorGuid $connectorGuid -ConnectorName $connectorName `
+                            -JobGuid $job.JobGuid -JobStatus $job.Type
+                        if ($result._Exception) {
+                            Write-Error "Failed to cancel job $($job.JobGuid): $($result._ErrorMessage)"
+                            # Remove internal properties before outputting
+                            $result.PSObject.Properties.Remove('_Exception')
+                            $result.PSObject.Properties.Remove('_ErrorMessage')
                         }
-                        catch {
-                            $errorMessage = $_.Exception.Message
-                            if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
-                                try {
-                                    $errorXml = [xml]$_.ErrorDetails.Message
-                                    $errorMessage = "$($errorXml.error.code): $($errorXml.error.description)"
-                                }
-                                catch { }
-                            }
-                            Write-Error "Failed to cancel job $($job.JobGuid): $errorMessage"
-                            [PSCustomObject]@{
-                                ConnectorGuid = $connectorGuid
-                                ConnectorName = $connectorName
-                                JobGuid       = $job.JobGuid
-                                Status        = "Error: $errorMessage"
-                                CancelledAt   = $null
-                            }
-                        }
+                        $result
                     }
                 }
             }
             else {
                 # Single job cancellation
-                $timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
-                $cancelXml = "<job><cancelled>$timestamp</cancelled></job>"
                 $uri = "$baseUrl/users/$userId/devices/$connectorGuid/jobs/$JobGuid"
 
                 if ($PSCmdlet.ShouldProcess("$connectorName job $JobGuid", "Cancel")) {
                     $headers = @{
                         'Authorization' = $authHeader
                         'Content-Type'  = 'application/xml'
+                        'Accept'        = 'application/vnd.keepit.v4+xml'
                     }
-                    try {
-                        Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -Body $cancelXml -ErrorAction Stop | Out-Null
-                        [PSCustomObject]@{
-                            ConnectorGuid = $connectorGuid
-                            ConnectorName = $connectorName
-                            JobGuid       = $JobGuid
-                            Status        = 'Cancelled'
-                            CancelledAt   = $timestamp
-                        }
+                    $result = Invoke-JobCancellation -Uri $uri -Headers $headers `
+                        -ConnectorGuid $connectorGuid -ConnectorName $connectorName `
+                        -JobGuid $JobGuid -JobStatus 'single'
+                    if ($result._Exception) {
+                        $ex = $result._Exception
+                        $msg = $result._ErrorMessage
+                        $result.PSObject.Properties.Remove('_Exception')
+                        $result.PSObject.Properties.Remove('_ErrorMessage')
+                        $PSCmdlet.ThrowTerminatingError(
+                            [System.Management.Automation.ErrorRecord]::new(
+                                [System.Exception]::new("Failed to cancel job $JobGuid on connector '$connectorName': $msg", $ex),
+                                'KeepitJobError',
+                                [System.Management.Automation.ErrorCategory]::ConnectionError,
+                                $JobGuid
+                            )
+                        )
                     }
-                    catch {
-                        $errorMessage = $_.Exception.Message
-                        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
-                            try {
-                                $errorXml = [xml]$_.ErrorDetails.Message
-                                $errorMessage = "$($errorXml.error.code): $($errorXml.error.description)"
-                            }
-                            catch { }
-                        }
-                        throw "Failed to cancel job $JobGuid on connector '$connectorName': $errorMessage"
-                    }
+                    $result
                 }
             }
         }
         catch {
             $errorGuid = if ($connectorGuid) { $connectorGuid } else { $Connector }
-            throw "Failed to cancel job(s) on connector '$errorGuid': $($_.Exception.Message)"
+            $PSCmdlet.ThrowTerminatingError(
+                [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new("Failed to cancel job(s) on connector '$errorGuid': $($_.Exception.Message)", $_.Exception),
+                    'KeepitJobError',
+                    [System.Management.Automation.ErrorCategory]::ConnectionError,
+                    $errorGuid
+                )
+            )
         }
+    }
+}
+
+function New-AlreadyQueuedResult {
+    <#
+    .SYNOPSIS
+        Creates a status object for WAITING_JOB_TO_START or RUNNING_JOB API errors.
+        Used internally by Start-KeepitBackup.
+    #>
+    param(
+        [string]$ConnectorGuid,
+        [string]$ConnectorName,
+        [string]$Status,
+        [string]$ErrorCode,
+        [string]$ErrorDescription,
+        [string]$StartTime
+    )
+
+    [PSCustomObject]@{
+        ConnectorGuid        = $ConnectorGuid
+        Type                 = 'backup'
+        Description          = 'Job creation skipped'
+        Status               = $Status
+        CreatedAt            = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+        ErrorCode            = $ErrorCode
+        ErrorMessage         = $ErrorDescription
+        ExistingJobStartTime = $StartTime
     }
 }
 
@@ -632,14 +712,14 @@ function Stop-KeepitJob {
     automating backup operations across multiple connectors.
 #>
 function Start-KeepitBackup {
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
         [ValidateNotNullOrEmpty()]
         [Alias('ConnectorGuid', 'Name')]
         [string]$Connector,
 
-        [Parameter(Mandatory = $false)]
         [DateTime]$ScheduledTime
     )
 
@@ -658,7 +738,7 @@ function Start-KeepitBackup {
             Write-Verbose "Initialization completed successfully"
         }
         catch {
-            throw "Failed to initialize: $($_.Exception.Message)"
+            throw
         }
     }
 
@@ -699,291 +779,252 @@ function Start-KeepitBackup {
             $headers = @{
                 'Authorization' = $authHeader
                 'Content-Type' = 'application/xml'
+                'Accept' = 'application/vnd.keepit.v4+xml'
             }
 
             Write-Verbose "=== Sending API Request ==="
 
-            # Make API call with error handling
-            try {
-                $response = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $xmlBody -ErrorAction Stop
-            }
-            catch {
-                # Handle HTTP error responses
-                $errorMessage = $_.Exception.Message
-                $statusCode = $null
-                $apiError = $null
-                $errorBody = $null
+            if ($PSCmdlet.ShouldProcess("connector $($resolved.Name) ($connectorGuid)", 'Start backup')) {
+                # Make API call with error handling
+                try {
+                    $response = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $xmlBody -ErrorAction Stop
+                }
+                catch {
+                    # Handle HTTP error responses
+                    $errorMessage = $_.Exception.Message
+                    $statusCode = $null
+                    $apiError = $null
+                    $errorBody = $null
 
-                # Try to extract the error response body
-                if ($_.Exception -is [Microsoft.PowerShell.Commands.HttpResponseException]) {
-                    $statusCode = $_.Exception.Response.StatusCode.value__
-                    Write-Verbose "HTTP Status Code: $statusCode"
-                }
-                elseif ($_.Exception.Response) {
-                    $statusCode = $_.Exception.Response.StatusCode.value__
-                    Write-Verbose "HTTP Status Code: $statusCode"
-                }
+                    # Try to extract the error response body
+                    if ($_.Exception -is [Microsoft.PowerShell.Commands.HttpResponseException]) {
+                        $statusCode = $_.Exception.Response.StatusCode.value__
+                        Write-Verbose "HTTP Status Code: $statusCode"
+                    }
+                    elseif ($_.Exception.Response) {
+                        $statusCode = $_.Exception.Response.StatusCode.value__
+                        Write-Verbose "HTTP Status Code: $statusCode"
+                    }
 
-                # Try to get error response body from ErrorDetails
-                if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
-                    $errorBody = $_.ErrorDetails.Message
-                    Write-Verbose "Error response body from ErrorDetails:`n$errorBody"
-                }
-                elseif ($errorMessage -match '(?s)<error>.*?</error>') {
-                    # Fall back to extracting from error message with single-line mode
-                    $errorBody = $matches[0]
-                    Write-Verbose "Error response body from exception message:`n$errorBody"
-                }
+                    # Try to get error response body from ErrorDetails
+                    if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+                        $errorBody = $_.ErrorDetails.Message
+                        Write-Verbose "Error response body from ErrorDetails:`n$errorBody"
+                    }
+                    elseif ($errorMessage -match '(?s)<error>.*?</error>') {
+                        # Fall back to extracting from error message with single-line mode
+                        $errorBody = $matches[0]
+                        Write-Verbose "Error response body from exception message:`n$errorBody"
+                    }
 
-                # Try to parse error response as XML
-                if ($errorBody) {
-                    Write-Verbose "Attempting to parse error response as XML"
-                    try {
-                        $errorXml = [xml]$errorBody
-                        $apiError = [PSCustomObject]@{
-                            Code = $errorXml.error.code
-                            Description = $errorXml.error.description
-                            StartTime = $errorXml.error.'start-time'
+                    # Try to parse error response as XML
+                    if ($errorBody) {
+                        Write-Verbose "Attempting to parse error response as XML"
+                        try {
+                            $errorXml = [xml]$errorBody
+                            $apiError = [PSCustomObject]@{
+                                Code = $errorXml.error.code
+                                Description = $errorXml.error.description
+                                StartTime = $errorXml.error.'start-time'
+                            }
+                            Write-Verbose "Parsed API Error - Code: $($apiError.Code), Description: $($apiError.Description)"
                         }
-                        Write-Verbose "Parsed API Error - Code: $($apiError.Code), Description: $($apiError.Description)"
+                        catch {
+                            Write-Verbose "Could not parse error XML: $($_.Exception.Message)"
+                        }
                     }
-                    catch {
-                        Write-Verbose "Could not parse error XML: $($_.Exception.Message)"
+
+                    # Handle specific error cases gracefully
+                    if ($apiError -and ($apiError.Code -eq 'WAITING_JOB_TO_START' -or $apiError.Code -eq 'RUNNING_JOB')) {
+                        $status = if ($apiError.Code -eq 'WAITING_JOB_TO_START') { 'AlreadyQueued' } else { 'AlreadyRunning' }
+                        $reason = if ($apiError.Code -eq 'WAITING_JOB_TO_START') { 'another backup job is already queued' } else { 'a backup job is already running' }
+                        Write-Verbose "Handling $($apiError.Code) gracefully"
+                        Write-Warning "Cannot start backup for connector $connectorGuid - $reason (start time: $($apiError.StartTime))"
+
+                        $statusObject = New-AlreadyQueuedResult `
+                            -ConnectorGuid $connectorGuid -ConnectorName $resolved.Name `
+                            -Status $status -ErrorCode $apiError.Code `
+                            -ErrorDescription $apiError.Description -StartTime $apiError.StartTime
+
+                        Write-Verbose "=== Job Creation Skipped ==="
+                        Write-Verbose "Reason: $reason"
+                        Write-Verbose "Existing job start time: $($apiError.StartTime)"
+                        Write-Verbose "=== End Start-KeepitBackup ==="
+
+                        return $statusObject
+                    }
+                    elseif ($apiError) {
+                        # Build user-friendly error message for other API errors
+                        $friendlyMessage = "API Error [$($apiError.Code)]: $($apiError.Description)"
+                        if ($apiError.StartTime) {
+                            $friendlyMessage += " (Start time: $($apiError.StartTime))"
+                        }
+                        throw $friendlyMessage
+                    }
+                    else {
+                        # Re-throw original error if we couldn't parse it
+                        throw
                     }
                 }
 
-                # Handle specific error cases gracefully
-                if ($apiError -and $apiError.Code -eq 'WAITING_JOB_TO_START') {
-                    # Return a status object instead of throwing an error
-                    Write-Verbose "Handling WAITING_JOB_TO_START gracefully"
-                    Write-Warning "Cannot start backup for connector $connectorGuid - another backup job is already queued (scheduled for $($apiError.StartTime))"
+                # Debug: Show raw response
+                Write-Verbose "=== API Response Received ==="
 
-                    $statusObject = [PSCustomObject]@{
+                # Handle empty response (some connector types return 201 Created with no body)
+                if ($null -eq $response -or ($response -is [string] -and [string]::IsNullOrWhiteSpace($response))) {
+                    Write-Verbose "API returned empty response - treating as successful job submission"
+
+                    $jobObject = [PSCustomObject]@{
                         ConnectorGuid = $connectorGuid
                         Type = 'backup'
-                        Description = 'Job creation skipped'
-                        Status = 'AlreadyQueued'
+                        Description = 'User-requested backup'
+                        Status = 'Submitted'
                         CreatedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
-                        ErrorCode = $apiError.Code
-                        ErrorMessage = $apiError.Description
-                        ExistingJobStartTime = $apiError.StartTime
                     }
 
-                    Write-Verbose "=== Job Creation Skipped ==="
-                    Write-Verbose "Reason: Another job already queued"
-                    Write-Verbose "Existing job start time: $($apiError.StartTime)"
+                    Write-Verbose "=== Backup Job Submitted ==="
+                    Write-Verbose "Connector: $connectorGuid"
+                    Write-Verbose "Note: API did not return job details"
                     Write-Verbose "=== End Start-KeepitBackup ==="
 
-                    return $statusObject
+                    return $jobObject
                 }
-                elseif ($apiError -and $apiError.Code -eq 'RUNNING_JOB') {
-                    # Return a status object instead of throwing an error
-                    Write-Verbose "Handling RUNNING_JOB gracefully"
-                    Write-Warning "Cannot start backup for connector $connectorGuid - a backup job is already running (started $($apiError.StartTime))"
 
-                    $statusObject = [PSCustomObject]@{
-                        ConnectorGuid = $connectorGuid
-                        Type = 'backup'
-                        Description = 'Job creation skipped'
-                        Status = 'AlreadyRunning'
-                        CreatedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
-                        ErrorCode = $apiError.Code
-                        ErrorMessage = $apiError.Description
-                        ExistingJobStartTime = $apiError.StartTime
-                    }
+                Write-Verbose "Response Type: $($response.GetType().FullName)"
 
-                    Write-Verbose "=== Job Creation Skipped ==="
-                    Write-Verbose "Reason: Another job already running"
-                    Write-Verbose "Existing job start time: $($apiError.StartTime)"
-                    Write-Verbose "=== End Start-KeepitBackup ==="
-
-                    return $statusObject
+                if ($response -is [System.Xml.XmlDocument]) {
+                    Write-Verbose "Response is XML Document"
+                    Write-Verbose "Response XML Content:"
+                    Write-Verbose $response.OuterXml
                 }
-                elseif ($apiError) {
-                    # Build user-friendly error message for other API errors
-                    $friendlyMessage = "API Error [$($apiError.Code)]: $($apiError.Description)"
-                    if ($apiError.StartTime) {
-                        $friendlyMessage += " (Start time: $($apiError.StartTime))"
-                    }
-                    throw $friendlyMessage
+                elseif ($response -is [System.Xml.XmlElement]) {
+                    Write-Verbose "Response is XML Element"
+                    Write-Verbose "Root Element Name: $($response.LocalName)"
+                    Write-Verbose "Response XML Content:"
+                    Write-Verbose $response.OuterXml
                 }
                 else {
-                    # Re-throw original error if we couldn't parse it
-                    throw
+                    Write-Verbose "Response is Object (not XML)"
+                    try {
+                        Write-Verbose "Response Object (JSON):"
+                        Write-Verbose ($response | ConvertTo-Json -Depth 5)
+                    }
+                    catch {
+                        Write-Verbose "Could not convert response to JSON: $($_.Exception.Message)"
+                        Write-Verbose "Response String: $($response | Out-String)"
+                    }
                 }
-            }
 
-            # Debug: Show raw response
-            Write-Verbose "=== API Response Received ==="
+                # Check if response is an error (in case Invoke-RestMethod didn't throw)
+                if ($response.error) {
+                    Write-Verbose "Response contains error element - handling as API error"
+                    $apiError = [PSCustomObject]@{
+                        Code = $response.error.code
+                        Description = $response.error.description
+                        StartTime = $response.error.'start-time'
+                    }
+                    Write-Verbose "API Error - Code: $($apiError.Code), Description: $($apiError.Description)"
 
-            # Handle empty response (some connector types return 201 Created with no body)
-            if ($null -eq $response -or ($response -is [string] -and [string]::IsNullOrWhiteSpace($response))) {
-                Write-Verbose "API returned empty response - treating as successful job submission"
+                    # Handle specific error cases gracefully
+                    if ($apiError.Code -eq 'WAITING_JOB_TO_START' -or $apiError.Code -eq 'RUNNING_JOB') {
+                        $status = if ($apiError.Code -eq 'WAITING_JOB_TO_START') { 'AlreadyQueued' } else { 'AlreadyRunning' }
+                        $reason = if ($apiError.Code -eq 'WAITING_JOB_TO_START') { 'another backup job is already queued' } else { 'a backup job is already running' }
+                        Write-Verbose "Handling $($apiError.Code) gracefully"
+                        Write-Warning "Cannot start backup for connector $connectorGuid - $reason (start time: $($apiError.StartTime))"
+
+                        $statusObject = New-AlreadyQueuedResult `
+                            -ConnectorGuid $connectorGuid -ConnectorName $resolved.Name `
+                            -Status $status -ErrorCode $apiError.Code `
+                            -ErrorDescription $apiError.Description -StartTime $apiError.StartTime
+
+                        Write-Verbose "=== Job Creation Skipped ==="
+                        Write-Verbose "Reason: $reason"
+                        Write-Verbose "Existing job start time: $($apiError.StartTime)"
+                        Write-Verbose "=== End Start-KeepitBackup ==="
+
+                        return $statusObject
+                    }
+                    else {
+                        # Build user-friendly error message for other API errors
+                        $friendlyMessage = "API Error [$($apiError.Code)]: $($apiError.Description)"
+                        if ($apiError.StartTime) {
+                            $friendlyMessage += " (Start time: $($apiError.StartTime))"
+                        }
+                        throw $friendlyMessage
+                    }
+                }
+
+                # Parse response
+                Write-Verbose "Attempting to parse response structure..."
+                $job = if ($response.job) {
+                    Write-Verbose "Found response.job element"
+                    $response.job
+                }
+                elseif ($response.jobs.job) {
+                    Write-Verbose "Found response.jobs.job element"
+                    if ($response.jobs.job -is [System.Array]) {
+                        Write-Verbose "response.jobs.job is an array, taking first element"
+                        $response.jobs.job[0]
+                    }
+                    else {
+                        Write-Verbose "response.jobs.job is a single object"
+                        $response.jobs.job
+                    }
+                }
+                else {
+                    Write-Verbose "ERROR: Could not find job in response. Available properties:"
+                    $response | Get-Member -MemberType Properties | ForEach-Object {
+                        Write-Verbose "  - $($_.Name): $($response.($_.Name))"
+                    }
+                    throw "Unexpected response structure from API. Expected 'job' or 'jobs.job' element. See verbose output for details."
+                }
+
+                Write-Verbose "Successfully parsed job. JobGuid: $($job.guid)"
+
+                # Create and output job object
+                $statusValue = if ($PSBoundParameters.ContainsKey('ScheduledTime')) {
+                    'Scheduled'
+                } elseif ($job.active -eq $true -or $job.active -eq 'true') {
+                    'Active'
+                } else {
+                    'Pending'
+                }
+                $scheduledTimeValue = if ($PSBoundParameters.ContainsKey('ScheduledTime')) { $timeStr } else { $null }
 
                 $jobObject = [PSCustomObject]@{
                     ConnectorGuid = $connectorGuid
-                    Type = 'backup'
-                    Description = 'User-requested backup'
-                    Status = 'Submitted'
+                    Type = if ($job.type) { $job.type } else { 'backup' }
+                    Description = if ($job.description) { $job.description } else { 'User-requested backup' }
+                    Status = $statusValue
                     CreatedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+                    ScheduledTime = $scheduledTimeValue
                 }
 
-                Write-Verbose "=== Backup Job Submitted ==="
-                Write-Verbose "Connector: $connectorGuid"
-                Write-Verbose "Note: API did not return job details"
+                Write-Verbose "=== Job Created Successfully ==="
+                Write-Verbose "Type: $($jobObject.Type)"
+                Write-Verbose "Status: $($jobObject.Status)"
+                if ($scheduledTimeValue) { Write-Verbose "ScheduledTime: $scheduledTimeValue" }
+                Write-Verbose "CreatedAt: $($jobObject.CreatedAt)"
                 Write-Verbose "=== End Start-KeepitBackup ==="
 
-                return $jobObject
+                $jobObject
             }
-
-            Write-Verbose "Response Type: $($response.GetType().FullName)"
-
-            if ($response -is [System.Xml.XmlDocument]) {
-                Write-Verbose "Response is XML Document"
-                Write-Verbose "Response XML Content:"
-                Write-Verbose $response.OuterXml
-            }
-            elseif ($response -is [System.Xml.XmlElement]) {
-                Write-Verbose "Response is XML Element"
-                Write-Verbose "Root Element Name: $($response.LocalName)"
-                Write-Verbose "Response XML Content:"
-                Write-Verbose $response.OuterXml
-            }
-            else {
-                Write-Verbose "Response is Object (not XML)"
-                try {
-                    Write-Verbose "Response Object (JSON):"
-                    Write-Verbose ($response | ConvertTo-Json -Depth 5)
-                }
-                catch {
-                    Write-Verbose "Could not convert response to JSON: $($_.Exception.Message)"
-                    Write-Verbose "Response String: $($response | Out-String)"
-                }
-            }
-
-            # Check if response is an error (in case Invoke-RestMethod didn't throw)
-            if ($response.error) {
-                Write-Verbose "Response contains error element - handling as API error"
-                $apiError = [PSCustomObject]@{
-                    Code = $response.error.code
-                    Description = $response.error.description
-                    StartTime = $response.error.'start-time'
-                }
-                Write-Verbose "API Error - Code: $($apiError.Code), Description: $($apiError.Description)"
-
-                # Handle specific error cases gracefully
-                if ($apiError.Code -eq 'WAITING_JOB_TO_START') {
-                    Write-Verbose "Handling WAITING_JOB_TO_START gracefully"
-                    Write-Warning "Cannot start backup for connector $connectorGuid - another backup job is already queued (scheduled for $($apiError.StartTime))"
-
-                    $statusObject = [PSCustomObject]@{
-                        ConnectorGuid = $connectorGuid
-                        Type = 'backup'
-                        Description = 'Job creation skipped'
-                        Status = 'AlreadyQueued'
-                        CreatedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
-                        ErrorCode = $apiError.Code
-                        ErrorMessage = $apiError.Description
-                        ExistingJobStartTime = $apiError.StartTime
-                    }
-
-                    Write-Verbose "=== Job Creation Skipped ==="
-                    Write-Verbose "Reason: Another job already queued"
-                    Write-Verbose "Existing job start time: $($apiError.StartTime)"
-                    Write-Verbose "=== End Start-KeepitBackup ==="
-
-                    return $statusObject
-                }
-                elseif ($apiError.Code -eq 'RUNNING_JOB') {
-                    Write-Verbose "Handling RUNNING_JOB gracefully"
-                    Write-Warning "Cannot start backup for connector $connectorGuid - a backup job is already running (started $($apiError.StartTime))"
-
-                    $statusObject = [PSCustomObject]@{
-                        ConnectorGuid = $connectorGuid
-                        Type = 'backup'
-                        Description = 'Job creation skipped'
-                        Status = 'AlreadyRunning'
-                        CreatedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
-                        ErrorCode = $apiError.Code
-                        ErrorMessage = $apiError.Description
-                        ExistingJobStartTime = $apiError.StartTime
-                    }
-
-                    Write-Verbose "=== Job Creation Skipped ==="
-                    Write-Verbose "Reason: Another job already running"
-                    Write-Verbose "Existing job start time: $($apiError.StartTime)"
-                    Write-Verbose "=== End Start-KeepitBackup ==="
-
-                    return $statusObject
-                }
-                else {
-                    # Build user-friendly error message for other API errors
-                    $friendlyMessage = "API Error [$($apiError.Code)]: $($apiError.Description)"
-                    if ($apiError.StartTime) {
-                        $friendlyMessage += " (Start time: $($apiError.StartTime))"
-                    }
-                    throw $friendlyMessage
-                }
-            }
-
-            # Parse response
-            Write-Verbose "Attempting to parse response structure..."
-            $job = if ($response.job) {
-                Write-Verbose "Found response.job element"
-                $response.job
-            }
-            elseif ($response.jobs.job) {
-                Write-Verbose "Found response.jobs.job element"
-                if ($response.jobs.job -is [System.Array]) {
-                    Write-Verbose "response.jobs.job is an array, taking first element"
-                    $response.jobs.job[0]
-                }
-                else {
-                    Write-Verbose "response.jobs.job is a single object"
-                    $response.jobs.job
-                }
-            }
-            else {
-                Write-Verbose "ERROR: Could not find job in response. Available properties:"
-                $response | Get-Member -MemberType Properties | ForEach-Object {
-                    Write-Verbose "  - $($_.Name): $($response.($_.Name))"
-                }
-                throw "Unexpected response structure from API. Expected 'job' or 'jobs.job' element. See verbose output for details."
-            }
-
-            Write-Verbose "Successfully parsed job. JobGuid: $($job.guid)"
-
-            # Create and output job object
-            $statusValue = if ($PSBoundParameters.ContainsKey('ScheduledTime')) {
-                'Scheduled'
-            } elseif ($job.active -eq $true -or $job.active -eq 'true') {
-                'Active'
-            } else {
-                'Pending'
-            }
-            $scheduledTimeValue = if ($PSBoundParameters.ContainsKey('ScheduledTime')) { $timeStr } else { $null }
-
-            $jobObject = [PSCustomObject]@{
-                ConnectorGuid = $connectorGuid
-                Type = if ($job.type) { $job.type } else { 'backup' }
-                Description = if ($job.description) { $job.description } else { 'User-requested backup' }
-                Status = $statusValue
-                CreatedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
-                ScheduledTime = $scheduledTimeValue
-            }
-
-            Write-Verbose "=== Job Created Successfully ==="
-            Write-Verbose "Type: $($jobObject.Type)"
-            Write-Verbose "Status: $($jobObject.Status)"
-            if ($scheduledTimeValue) { Write-Verbose "ScheduledTime: $scheduledTimeValue" }
-            Write-Verbose "CreatedAt: $($jobObject.CreatedAt)"
-            Write-Verbose "=== End Start-KeepitBackup ==="
-
-            $jobObject
         }
         catch {
-            throw "Failed to start backup job for connector $connectorGuid : $($_.Exception.Message)"
+            $errorIdentifier = if ($connectorGuid) { $connectorGuid } else { $Connector }
+            $PSCmdlet.ThrowTerminatingError(
+                [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new("Failed to start backup job for connector $errorIdentifier : $($_.Exception.Message)", $_.Exception),
+                    'KeepitJobError',
+                    [System.Management.Automation.ErrorCategory]::ConnectionError,
+                    $errorIdentifier
+                )
+            )
         }
+    }
+
+    end {
+        Write-Verbose "Start-KeepitBackup completed"
     }
 }
 

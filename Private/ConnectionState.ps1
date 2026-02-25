@@ -9,7 +9,7 @@
     and get information about existing Microsoft 365 connectors.
 .NOTES
     Author: Keepit
-    Version: 0.7.7
+    Version: 1.2.0
 #>
 
 # Module-scoped variables

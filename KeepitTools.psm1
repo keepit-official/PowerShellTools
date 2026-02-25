@@ -20,3 +20,10 @@
 foreach ($script in (Get-ChildItem -Path "$PSScriptRoot/Public" -Filter '*.ps1' -ErrorAction Stop)) {
     . $script.FullName
 }
+
+# Aliases for PowerShell naming convention compliance (A15, A16)
+# Singular-noun aliases for plural-noun cmdlets
+New-Alias -Name 'Get-KeepitJob'  -Value 'Get-KeepitJobs'  -Scope Script
+New-Alias -Name 'Get-KeepitRole' -Value 'Get-KeepitRoles' -Scope Script
+# Approved-verb alias for Search-KeepitSnapshot
+New-Alias -Name 'Find-KeepitSnapshot' -Value 'Search-KeepitSnapshot' -Scope Script
