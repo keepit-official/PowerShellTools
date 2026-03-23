@@ -44,10 +44,10 @@
         - Succeeded: Whether the action succeeded (based on HTTP return code)
         - ClientIP: IP address of the client
         - Device: Device/connector GUID (if applicable)
-        - Token: Token used for the action (masked for security)
+        - Token: UPN or name of the API token that performed the action
 .NOTES
     Requires an active connection via Connect-KeepitService.
-    Maximum 10,000 records returned per request. Token values are masked for security.
+    Maximum 10,000 records returned per request.
 #>
 function Get-KeepitAuditLog {
     [CmdletBinding()]
@@ -123,7 +123,8 @@ function Get-KeepitAuditLog {
         }
 
         if ($PSBoundParameters.ContainsKey('Area')) {
-            $filterXml += "<area>$Area</area>"
+            $escapedArea = [System.Security.SecurityElement]::Escape($Area)
+            $filterXml += "<area>$escapedArea</area>"
             Write-Verbose "Area filter: $Area"
         }
 

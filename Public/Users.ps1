@@ -123,9 +123,15 @@ function New-KeepitUser {
 
         # Step 3: Generate 16-character random password using cryptographic RNG
         $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^*'
-        $rngBytes = [byte[]]::new(16)
-        [System.Security.Cryptography.RandomNumberGenerator]::Fill($rngBytes)
-        $passwordChars = $rngBytes | ForEach-Object { $chars[$_ % $chars.Length] }
+        $maxUnbiased = 256 - (256 % $chars.Length)
+        $passwordChars = @()
+        while ($passwordChars.Count -lt 16) {
+            $byte = [byte[]]::new(1)
+            [System.Security.Cryptography.RandomNumberGenerator]::Fill($byte)
+            if ($byte[0] -lt $maxUnbiased) {
+                $passwordChars += $chars[$byte[0] % $chars.Length]
+            }
+        }
         $password = -join $passwordChars
         Write-Verbose "Generated random password (16 chars)"
 

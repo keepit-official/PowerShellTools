@@ -516,7 +516,7 @@ function Resolve-RestoreJobPlan {
 .PARAMETER RootPath
     The folder path to search from deleted items, relative to the user's Outlook folder.
     Examples: "Inbox", "Calendar", "Deleted Items"
-    This will be expanded to: /Users/{userGuid}/Outlook/{RootPath} for mail items
+    This will be expanded to: /Users/{UPN}/Outlook/{RootPath} for mail items
 .PARAMETER RestorePath
     The folder path to restore items to. Currently not implemented - items are restored
     in-place to their original location. A warning will be displayed if this parameter is used.
@@ -527,6 +527,12 @@ function Resolve-RestoreJobPlan {
 .PARAMETER Type
     The type of items to restore. Valid values: email, user, OneDrive.
     Default is "email".
+.PARAMETER SearchTerms
+    Optional text to filter deleted items by content before restoring.
+    Performs a fuzzy search across item metadata (subject, sender, recipients).
+    Use quoted strings for exact match, e.g., '"user@contoso.com"'.
+    When omitted, all deleted items in the date range are restored.
+    This parameter is passed directly to Search-KeepitSnapshot's -SearchTerms.
 .PARAMETER Recursive
     Search recursively in subfolders of RootPath.
     By default, searches only the immediate RootPath. Use -Recursive to include subfolders. Not available when restoring mail.
@@ -545,6 +551,10 @@ function Resolve-RestoreJobPlan {
     Restore-KeepitBulkDeletedItems -UPN "user@example.com" -Connector "Production M365" -RootPath "Deleted Items" -StartTime (Get-Date).AddDays(-30) -EndTime (Get-Date) -WhatIf
 
     Shows what would be restored from the Deleted Items folder for the last 30 days without actually restoring
+.EXAMPLE
+    Restore-KeepitBulkDeletedItems -Connector "M365 Prod" -UserPrincipalName "jsmith@contoso.com" -RootPath "Inbox" -StartTime "2026-01-01" -EndTime "2026-03-01" -SearchTerms '"ceo@contoso.com"' -WhatIf
+
+    Shows a preview of deleted items in jsmith's Inbox that match "ceo@contoso.com" (emails from or to the CEO) in the specified date range.
 .OUTPUTS
     With -WhatIf: PSCustomObject with properties (jobs are NOT submitted):
         - TotalItems: Total number of items that would be restored
@@ -594,6 +604,9 @@ function Restore-KeepitBulkDeletedItems {
         [Parameter(Mandatory = $false)]
         [ValidateSet('email', 'user', 'OneDrive')]
         [string]$Type = 'email',
+
+        [Parameter(Mandatory = $false)]
+        [string]$SearchTerms,
 
         [Parameter(Mandatory = $false)]
         [switch]$Recursive,
@@ -652,28 +665,21 @@ function Restore-KeepitBulkDeletedItems {
             Write-Verbose "StartTime: $StartTime"
             Write-Verbose "EndTime: $EndTime"
             Write-Verbose "Type: $Type"
-
-            # Step 1: Convert UserPrincipalName to GUID if needed (for email type only)
-            # For user type, we filter by UPN in the Title field instead, since the user may have been
-            # recreated with a new GUID after deletion
-            $userGuid = $UserPrincipalName
-            if ($Type -ne 'user' -and $UserPrincipalName -match '@') {
-                Write-Verbose "UserPrincipalName appears to be a UPN, converting to GUID..."
-                $guidResult = Convert-KeepitUPNToGuid -UserPrincipalName $UserPrincipalName -Connector $connectorGuid
-                if (-not $guidResult -or -not $guidResult.Guid) {
-                    throw "Failed to convert UPN '$UserPrincipalName' to GUID. User may not exist in the backup."
-                }
-                $userGuid = $guidResult.Guid
-                Write-Verbose "Converted UPN to GUID: $userGuid"
+            if ($SearchTerms) {
+                Write-Verbose "SearchTerms: $SearchTerms"
             }
 
-            # Step 2: Construct the pathroot, removing leading/trailing slashes
-            # If the type is 'email', as it will be by default, we can use this path. For other types, we'll have to construct the path differently.
+            # Step 1: Construct the path using the UPN. Search-KeepitSnapshot
+            # handles UPN-to-GUID conversion internally, so we pass the UPN
+            # directly in the path to avoid double-dash GUID format issues.
+            # For user type, we filter by UPN in the Title field instead,
+            # since the user may have been recreated with a new GUID after deletion.
+            $userIdentity = $UserPrincipalName
             $cleanRootPath = $RootPath.Trim('/')
 
             if ($Type -eq 'email') {
                 # For email items, the path is under Outlook
-                $pathRoot = "/Users/$userGuid/Outlook/$cleanRootPath"
+                $pathRoot = "/Users/$userIdentity/Outlook/$cleanRootPath"
             } elseif ($Type -eq 'user') {
                 # For user items, search at /Users level to find user objects
                 # Results will be filtered by UPN after search
@@ -682,9 +688,9 @@ function Restore-KeepitBulkDeletedItems {
                 # this is a little tricky. Some devices will have a path of /Users/{userGuid}/OneDrive, others /users/{userGuid}/OneDriveSP/DocLibs/Documents/Content
                 # there's no way for us to tell in advance which path the device / user combo will have so we will have to check both
                 # Start with the user-provided path under the user's folder
-                $pathRoot = "/Users/$userGuid/$cleanRootPath"
+                $pathRoot = "/Users/$userIdentity/$cleanRootPath"
             }
-            Write-Verbose "Constructed RootPath: $cleanRootPath"
+            Write-Verbose "Constructed RootPath: $pathRoot"
 
             # Step 3: Search for deleted items
             Write-Verbose "Searching for deleted items..."
@@ -695,6 +701,9 @@ function Restore-KeepitBulkDeletedItems {
                 ResultSize  = 'Unlimited'
                 StartTime   = $normalizedStartTime
                 EndTime     = $normalizedEndTime
+            }
+            if ($SearchTerms) {
+                $searchParams.SearchTerms = $SearchTerms
             }
             if ($Type -eq 'user') {
                 $searchParams.Recursive = $false
@@ -712,10 +721,10 @@ function Restore-KeepitBulkDeletedItems {
                 Write-Verbose "No deleted items found for OneDrive - trying alternate path format..."
                 if ($cleanRootPath -like 'OneDrive*') {
                     # user supplied /OneDrive*, try /OneDriveSP/DocLibs/Documents/Content
-                    $altPathRoot = "/Users/$userGuid/OneDriveSP/DocLibs/Documents/Content"
+                    $altPathRoot = "/Users/$userIdentity/OneDriveSP/DocLibs/Documents/Content"
                 } else {
                     # user supplied /OneDriveSP/DocLibs/Documents/Content, try /OneDrive
-                    $altPathRoot = "/Users/$userGuid/OneDrive"
+                    $altPathRoot = "/Users/$userIdentity/OneDrive"
                 }
                 Write-Verbose "Trying alternate RootPath: $altPathRoot"
                 $searchParams.RootPath = $altPathRoot
@@ -1116,9 +1125,9 @@ function Convert-KeepitUPNToGuid {
                 return $null
             }
 
-            # Escape single dashes to double dashes for Keepit path format
-            $guid = $guid -replace '(?<!-)-(?!-)', '--'
-            Write-Verbose "Path-escaped GUID: $guid"
+            # Return the raw GUID — path masking (dash doubling) is handled
+            # by ConvertTo-MaskedPath in Search-KeepitSnapshot, so we must
+            # not double dashes here or they get quadrupled.
 
             # Return result object
             [PSCustomObject]@{
@@ -1483,17 +1492,9 @@ function Start-KeepitExpressRestore {
             Write-Verbose "Connector: $($resolved.Name) ($connectorGuid)"
             Write-Verbose "Workload: $Workload"
 
-            # Convert UPN to GUID for path construction
-            $userGuid = $UserPrincipalName
-            if ($UserPrincipalName -match '@') {
-                Write-Verbose "Converting UPN to GUID..."
-                $guidResult = Convert-KeepitUPNToGuid -UserPrincipalName $UserPrincipalName -Connector $connectorGuid
-                if (-not $guidResult -or -not $guidResult.Guid) {
-                    throw "Failed to convert UPN '$UserPrincipalName' to GUID. User may not exist in the backup."
-                }
-                $userGuid = $guidResult.Guid
-                Write-Verbose "Converted UPN to GUID: $userGuid"
-            }
+            # Use UPN directly for path construction. Search-KeepitSnapshot
+            # handles UPN-to-GUID conversion internally.
+            $userIdentity = $UserPrincipalName
 
             $jobResults = [System.Collections.ArrayList]::new()
             $whatIfItems = [System.Collections.ArrayList]::new()
@@ -1501,7 +1502,7 @@ function Start-KeepitExpressRestore {
             # --- Calendar priority pass ---
             if ($PrioritizeCalendar) {
                 Write-Verbose "PrioritizeCalendar: Searching Calendar folder..."
-                $calendarPath = "/Users/$userGuid/Outlook/Calendar"
+                $calendarPath = "/Users/$userIdentity/Outlook/Calendar"
 
                 $calSearchParams = @{
                     Connector       = $connectorGuid
@@ -1540,10 +1541,10 @@ function Start-KeepitExpressRestore {
             Write-Verbose "Searching mail folders..."
             if ($InboxOnly) {
                 $useRecursive = $false
-                $mailPath = "/Users/$userGuid/Outlook/Inbox"
+                $mailPath = "/Users/$userIdentity/Outlook/Inbox"
             }
             else {
-                $mailPath = "/Users/$userGuid/Outlook"
+                $mailPath = "/Users/$userIdentity/Outlook"
                 $useRecursive = $true
             }
 
@@ -1561,7 +1562,7 @@ function Start-KeepitExpressRestore {
 
             # Exclude Calendar items if they were already restored in the priority pass
             if ($PrioritizeCalendar -and $mailItems.Count -gt 0) {
-                $calendarPathPrefix = "/Users/$userGuid/Outlook/Calendar"
+                $calendarPathPrefix = "/Users/$userIdentity/Outlook/Calendar"
                 $beforeCount = $mailItems.Count
                 $mailItems = @($mailItems | Where-Object {
                     $itemPath = $_.Id -replace '^kng://[^/]+', ''

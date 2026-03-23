@@ -3,7 +3,7 @@
     RootModule = 'KeepitTools.psm1'
 
     # Version number of this module
-    ModuleVersion = '1.3.0'
+    ModuleVersion = '1.3.2'
 
     # Supported PSEditions
     CompatiblePSEditions = @('Core')
@@ -73,8 +73,6 @@
         'Search-KeepitSnapshot',
         'Convert-KeepitUPNToGuid',
         'Convert-KeepitGuidToUPN',
-        'Enable-KeepitConnector',
-        'Disable-KeepitConnector',
         'Submit-KeepitJob',
         'Restore-KeepitBulkDeletedItems',
         'New-KeepitConnector',

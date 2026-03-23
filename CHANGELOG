@@ -1,5 +1,20 @@
 # KeepitTools Changelog
 
+## Version 1.3.2
+
+- Restore-KeepitBulkDeletedItems: Add -SearchTerms parameter for filtering deleted items by sender, recipient, or content before restoring
+- Search-KeepitSnapshot: Update Entra ID RootPath validation to use display names (e.g., "Administrative units", "App registrations") instead of old API-style short names
+- Move Enable-KeepitConnector and Disable-KeepitConnector to ConnectorState.ps1; excluded from public module per support team request
+- Fix security audit findings SEC-1 through SEC-5
+
+## Version 1.3.1
+
+- Convert-KeepitUPNToGuid: Fix double-dash GUID bug where dashes were pre-escaped before ConvertTo-MaskedPath, resulting in quadruple dashes and failed searches
+- Restore-KeepitBulkDeletedItems: Use UPN directly in path construction instead of pre-masked GUID
+- Start-KeepitExpressRestore: Use UPN directly in path construction instead of pre-masked GUID
+- Get-KeepitConnector: Sort output lexicographically by connector Name
+- Move restore wizard apps (restore-bulk, restore-express) to Examples directory with READMEs
+
 ## Version 1.3.0
 
 - Start-KeepitExpressRestore: New cmdlet for express restore of recent user data by time window (Experimental)

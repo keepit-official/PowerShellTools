@@ -440,6 +440,9 @@ Search-KeepitSnapshot -Connector "your-connector-guid" -RootPath "/Users/user@ex
 # Restore deleted email items for a single user
 Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "your-connector-guid" -RootPath "Inbox" -StartTime "2024-01-01" -EndTime "2024-12-31"
 
+# Restore only deleted items matching a sender or recipient
+Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "your-connector-guid" -RootPath "Inbox" -StartTime "2024-01-01" -EndTime "2024-12-31" -SearchTerms '"ceo@example.com"'
+
 # Restore deleted items for multiple users from a CSV file
 # CSV should have columns like UPN, Email, or UserPrincipalName
 Import-Csv users.csv | Restore-KeepitBulkDeletedItems -Connector "your-connector-guid" -RootPath "Inbox" -StartTime "2024-01-01" -EndTime "2024-12-31"
@@ -645,6 +648,16 @@ You can use pipelining to fill the `-UserPrincipalName` value. If you wanted to 
 ```
 Import-CSV ./usersToRestore.csv | Restore-KeepitBulkDeletedItems -Connector "ExO Only" -rootPath "Inbox" -startTime 2026-01-01 -endTime 2026-01-10
 ```
+
+You can also use the `-SearchTerms` parameter to narrow the restore to items matching specific metadata (sender, recipient, or subject line). This uses the same server-side bsearch filtering as `Search-KeepitSnapshot`. Use quoted strings for exact match:
+
+```
+Restore-KeepitBulkDeletedItems -Connector "ExO Only" -UserPrincipalName paulr@blackdotpub.com `
+  -RootPath "Inbox" -StartTime 2026-01-10 -EndTime 2026-01-13 -SearchTerms '"ceo@blackdotpub.com"'
+```
+
+When `-SearchTerms` is omitted, all deleted items in the date range are restored.
+
 ### Restoring deleted files
 Currently OneDrive restores require you to specify the `-Type OneDrive` flag as well as a `RootPath` value. Due to a change in the way Microsoft creates OneDrives, older Keepit snapshots will have user OneDrive documents stored at a path of `/Users/_guid_/OneDrive/Documents`, but newer snapshots will use a path of `/Users/_guid_/OneDriveSP/DocLibs/Documents/Content`. The cmdlet is smart enough to use the new-style path if it doesn't find any deleted items at the old-style path _if you specify it_. It's probably best to default to use `-RootPath /OneDrive/` and let the cmdlet figure out what to do.
 

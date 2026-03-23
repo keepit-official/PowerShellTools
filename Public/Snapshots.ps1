@@ -838,13 +838,13 @@ function Search-KeepitSnapshot {
             # Validate Entra ID (azure-ad) pathroot prefixes
             if ($resolved.Type -eq 'azure-ad' -and $RootPath) {
                 $validEntraIdPaths = @(
-                    'Units',
-                    'Applications',
+                    'Administrative units',
+                    'App registrations',
                     'Devices',
                     'Groups',
                     'Policies',
                     'Roles',
-                    'ServicePrincipals',
+                    'Service principals',
                     'Users'
                 )
 

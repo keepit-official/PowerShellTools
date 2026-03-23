@@ -442,6 +442,7 @@ function Set-KeepitShare {
                 $tempCred = New-Object System.Management.Automation.PSCredential('unused', $Password)
                 $plainPassword = $tempCred.GetNetworkCredential().Password
                 $escapedPassword = [System.Security.SecurityElement]::Escape($plainPassword)
+                $plainPassword = $null
                 $xmlBody += "<password>$escapedPassword</password>"
             }
             elseif ($ClearPassword.IsPresent) {
