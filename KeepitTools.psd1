@@ -85,7 +85,8 @@
         'Remove-KeepitUser',
         'Set-KeepitShare',
         'Remove-KeepitShare',
-        'Start-KeepitExpressRestore'
+        'Start-KeepitExpressRestore',
+        'Get-KeepitItemAttributes'
     )
 
     # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry

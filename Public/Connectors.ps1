@@ -1884,6 +1884,24 @@ function New-KeepitConnector {
             $xmlBody += "<backup-retention>$RetentionPeriod</backup-retention>"
         }
 
+        # Standard connector attributes — single source of truth used for both the
+        # create XML and the post-enable individual PUT calls below.
+        $connectorAttributes = [ordered]@{
+            'is_admin'                               = '1'
+            'ng_sp_backup_uil'                       = '1'
+            'webui2_cfg_enabled'                     = '1'
+            'disable_auto_backup'                    = '1'
+            'ng_onedrivesp_enabled'                  = '1'
+            'sp_backup_permissions_with_new_approach' = '1'
+            'app_version'                            = '8.0'
+        }
+
+        $xmlBody += "<attributes>"
+        foreach ($kv in $connectorAttributes.GetEnumerator()) {
+            $xmlBody += "<attribute><name>$($kv.Key)</name><value>$($kv.Value)</value></attribute>"
+        }
+        $xmlBody += "</attributes>"
+
         # Add orglink if specified (required for M365 connectors to link to tenant)
         if ($OrgLink) {
             $escapedOrgLink = [System.Security.SecurityElement]::Escape($OrgLink)
@@ -2071,17 +2089,54 @@ function New-KeepitConnector {
             $attrUri = "$baseUrl/users/$userId/devices/$connectorGuid/attributes/$attributeKey"
             $attrHeaders = @{
                 'Authorization' = $authHeader
-                'Content-Type'  = 'application/octet-stream'
+                'Content-Type'  = 'text/plain'
             }
 
             Write-Verbose "Setting attribute '$attributeKey' at: $attrUri"
 
-            $configBytes = [System.Text.Encoding]::UTF8.GetBytes($configJson)
-            Invoke-RestMethod -Uri $attrUri -Method Put -Headers $attrHeaders -Body $configBytes -ErrorAction Stop
+            Invoke-RestMethod -Uri $attrUri -Method Put -Headers $attrHeaders -Body $configJson -ErrorAction Stop
 
             Write-Verbose "Configuration set successfully"
         }
 
+        # Enable the connector (PUT, not POST — POST can reinitialize and wipe attributes)
+        $uri = "$baseUrl/users/$userId/devices/$connectorGuid"
+        try {
+            Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -Body "<cloud><enabled>true</enabled></cloud>" -ErrorAction Stop
+            Write-Verbose "Connector enabled successfully"
+        }
+        catch {
+            Write-Warning "Enable connector returned non-success: $($_.Exception.Message)"
+        }
+
+        # Reinforce connector attributes individually via the attributes API
+        # (belt-and-suspenders — they were also set in the create XML)
+        $attrHeaders = @{
+            'Authorization' = $authHeader
+            'Content-Type'  = 'text/plain'
+        }
+
+        $failedAttributes = [System.Collections.Generic.List[string]]::new()
+        foreach ($attr in $connectorAttributes.GetEnumerator()) {
+            $attrUri = "$baseUrl/users/$userId/devices/$connectorGuid/attributes/$($attr.Key)"
+            Write-Verbose "Setting attribute '$($attr.Key)' = '$($attr.Value)'"
+            try {
+                Invoke-RestMethod -Uri $attrUri -Method Put -Headers $attrHeaders -Body $attr.Value -ErrorAction Stop
+            }
+            catch {
+                Write-Warning "Failed to set attribute '$($attr.Key)': $($_.Exception.Message)"
+                $failedAttributes.Add($attr.Key)
+            }
+        }
+
+        if ($failedAttributes.Count -gt 0) {
+            Write-Warning "Failed to set $($failedAttributes.Count) attribute(s): $($failedAttributes -join ', ')"
+        }
+        else {
+            Write-Verbose "All connector attributes set successfully"
+        }
+
+        
         # Build and return result object
         $result = [PSCustomObject]@{
             ConnectorGuid   = $connectorGuid

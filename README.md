@@ -120,7 +120,7 @@ Remove-Module KeepitTools
 | `Get-KeepitSnapshot`               | Retrieves snapshot information (latest, range, or count)           |
 | `Get-KeepitJobs`                   | Retrieves active and future backup/restore jobs for a connector    |
 | `Stop-KeepitJob`                   | Cancels running or scheduled backup/restore jobs                   |
-| `Start-KeepitBackup`               | Starts immediate backup job on a connector                         |
+| `Start-KeepitBackup`               | Starts immediate or scheduled backup job on a connector            |
 | `Search-KeepitSnapshot`            | Searches backup data using the BSearch API                         |
 | `Convert-KeepitUPNToGuid`          | Converts a User Principal Name to Keepit backup GUID               |
 | `Enable-KeepitConnector`           | Enables a disabled connector                                       |
@@ -132,11 +132,13 @@ Remove-Module KeepitTools
 | `Get-KeepitShare`                  | Lists all shared secure links for the authenticated user           |
 | `New-KeepitShare`                  | Creates a shared secure link with optional password and expiry     |
 | `Set-KeepitShare`                  | Updates properties of an existing shared secure link               |
-| `Remove-KeepitShare`              | Permanently deletes a shared secure link                           |
-| `Get-KeepitUser`                  | Lists all user accounts on the Keepit platform                     |
-| `New-KeepitUser`                  | Creates a new Keepit user account with role and connector access   |
-| `Remove-KeepitUser`              | Removes a Keepit user account                                      |
-| `Get-KeepitRoles`                | Lists available roles and their capabilities                       |
+| `Remove-KeepitShare`               | Permanently deletes a shared secure link                           |
+| `Get-KeepitUser`                   | Lists all user accounts on the Keepit platform                     |
+| `New-KeepitUser`                   | Creates a new Keepit user account with role and connector access   |
+| `Remove-KeepitUser`                | Removes a Keepit user account                                      |
+| `Get-KeepitRoles`                  | Lists available roles and their capabilities                       |
+| `Convert-KeepitGuidToUPN`          | Resolves Keepit backup GUIDs to User Principal Names               |
+| `Get-KeepitItemAttributes`         | Retrieves metadata attributes from the snapshot content API        |
 
 ## General Examples
 
@@ -211,7 +213,7 @@ Get-KeepitConnector | Start-KeepitBackup
 
 # Start backup and view job details
 $job = Start-KeepitBackup -Connector "your-connector-guid"
-$job | Format-List JobGuid, Type, Status, Scheduled
+$job | Format-List ConnectorGuid, Type, Status, CreatedAt, ScheduledTime
 
 # Schedule a backup 30 minutes from now
 Start-KeepitBackup -Connector "your-connector-guid" -ScheduledTime (Get-Date).AddMinutes(30)

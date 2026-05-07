@@ -1,5 +1,16 @@
 # KeepitTools Changelog
 
+## Version 1.3.3
+
+- Get-KeepitItemAttributes: New cmdlet to retrieve metadata attributes (e.g. SharePoint protected flag) from the snapshot content API
+- Search-KeepitSnapshot: Improve kng:meta element parsing to extract key/value pairs and boolean flags
+- New-KeepitConnector: Fix connector creation to embed required standard attributes in create XML and enable via PUT instead of POST
+- New-KeepitConnector: Fix attribute Content-Type from application/octet-stream to text/plain
+- New-KeepitConnector: Reinforce attributes via individual PUT calls after enable
+- New-KeepitConnector: Refactor standard attributes to single ordered hashtable (eliminates duplicate definition)
+- New-KeepitConnector: Replace Invoke-WebRequest enable call with Invoke-RestMethod
+- Get-KeepitItemAttributes: Collapse duplicate XML parsing branches; normalise string response to [xml] before dispatch
+
 ## Version 1.3.2
 
 - Restore-KeepitBulkDeletedItems: Add -SearchTerms parameter for filtering deleted items by sender, recipient, or content before restoring

@@ -1394,21 +1394,36 @@ function Search-KeepitSnapshot {
                     }
 
                     # Collect all other properties as metadata
+                    # Known fields already extracted above — skip them when building the metadata hashtable
+                    $skipFields = @('id', 'title', 'updated', 'published', 'name', 'size', 'deleted', 'class', 'content', 'link', 'category')
                     try {
-                        if ($entry.PSObject.Properties) {
-                            foreach ($prop in $entry.PSObject.Properties) {
-                                $propName = $prop.Name
-                                if ($propName -and $propName -notin @('id', 'title', 'updated', 'published', 'kng:name', 'name', 'kng:size', 'size', 'kng:deleted', 'deleted', 'kng:class', 'class', 'content', 'link')) {
-                                    $metadata[$propName] = $prop.Value
+                        if ($entry -is [System.Xml.XmlElement]) {
+                            # Iterate XML child elements, with special handling for kng:meta
+                            foreach ($childNode in $entry.ChildNodes) {
+                                $nodeName = $childNode.LocalName
+                                if (-not $nodeName -or $nodeName -in $skipFields) { continue }
+
+                                if ($nodeName -eq 'meta') {
+                                    # kng:meta elements use the 'key' attribute as the field name
+                                    $metaKey = $childNode.GetAttribute('key')
+                                    if (-not $metaKey) { continue }
+                                    if ($metaKey -in $skipFields) { continue }
+                                    # Empty elements (e.g. <kng:meta key="protected"/>) are boolean flags
+                                    $metaValue = $childNode.InnerText
+                                    $metadata[$metaKey] = if ($metaValue) { $metaValue } else { $true }
+                                }
+                                else {
+                                    # Other namespaced elements — store InnerText or $true for empty
+                                    $nodeValue = $childNode.InnerText
+                                    $metadata[$nodeName] = if ($nodeValue) { $nodeValue } else { $true }
                                 }
                             }
                         }
-                        elseif ($entry -is [System.Xml.XmlElement]) {
-                            # Handle XML element - iterate through child nodes
-                            foreach ($childNode in $entry.ChildNodes) {
-                                $nodeName = $childNode.LocalName
-                                if ($nodeName -and $nodeName -notin @('id', 'title', 'updated', 'published', 'name', 'size', 'deleted', 'class', 'content', 'link')) {
-                                    $metadata[$nodeName] = $childNode.InnerText
+                        elseif ($entry.PSObject.Properties) {
+                            foreach ($prop in $entry.PSObject.Properties) {
+                                $propName = $prop.Name
+                                if ($propName -and $propName -notin $skipFields -and $propName -notin @('kng:name', 'kng:size', 'kng:deleted', 'kng:class')) {
+                                    $metadata[$propName] = $prop.Value
                                 }
                             }
                         }
@@ -1551,6 +1566,204 @@ function Search-KeepitSnapshot {
 .OUTPUTS
     String - The masked path
 #>
+function Get-KeepitItemAttributes {
+    <#
+    .SYNOPSIS
+        Retrieves metadata attributes for an item in the Keepit backup snapshot tree.
+    .DESCRIPTION
+        Queries the snapshot content API to return container-level metadata attributes
+        that are not available through the bsearch API, such as the 'protected' flag
+        on SharePoint site collections.
+
+        By default, uses the latest snapshot. Specify -SnapshotId to query a specific
+        snapshot.
+    .PARAMETER Connector
+        The connector name or GUID to query.
+    .PARAMETER Path
+        The path within the backup tree. For SharePoint sites, use the full URL path,
+        e.g. '/SharePoint/https://tenant.sharepoint.com/sites/MySite'.
+    .PARAMETER SnapshotId
+        Optional snapshot ID. If omitted, the latest snapshot is used.
+    .PARAMETER Credential
+        Optional PSCredential for authentication. If omitted, uses the cached
+        authentication from Connect-KeepitService.
+    .EXAMPLE
+        Get-KeepitItemAttributes -Connector 'SharePoint' -Path '/SharePoint'
+
+        Lists top-level attributes of the SharePoint root container.
+    .EXAMPLE
+        Get-KeepitItemAttributes -Connector 'SharePoint' -Path '/SharePoint/https://tenant.sharepoint.com/sites/Retail'
+
+        Retrieves all metadata attributes for the specified SharePoint site,
+        including the 'protected' flag if present.
+    .EXAMPLE
+        Get-KeepitConnector | Get-KeepitItemAttributes -Path '/SharePoint'
+
+        Retrieves SharePoint root attributes for all connectors via pipeline.
+    #>
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('ConnectorGuid', 'Name')]
+        [ValidateNotNullOrEmpty()]
+        [string]$Connector,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Path,
+
+        [Parameter()]
+        [string]$SnapshotId,
+
+        [Parameter()]
+        [PSCredential]$Credential
+    )
+
+    begin {
+        Write-Verbose "Get-KeepitItemAttributes: Retrieving item attributes from snapshot content API"
+        $authHeader = Get-AuthHeader -Credential $Credential
+        $baseUrl = Get-KeepitBaseUrl
+        $userId = Get-KeepitUserId -AuthHeader $authHeader -BaseUrl $baseUrl
+    }
+
+    process {
+        try {
+            # Resolve connector identity to GUID
+            $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $connectorGuid = $resolved.ConnectorGuid
+            Write-Verbose "Connector: $($resolved.Name) ($connectorGuid)"
+
+            # Get latest snapshot ID if not provided
+            $snapshotIdToUse = $SnapshotId
+            if (-not $snapshotIdToUse) {
+                Write-Verbose "No SnapshotId provided, fetching latest snapshot"
+                $snapshotUri = "$baseUrl/users/$userId/devices/$connectorGuid/history/latest"
+                $snapshotHeaders = @{
+                    'Authorization' = $authHeader
+                    'Accept'        = 'application/vnd.keepit.v4+xml'
+                    'Content-Type'  = 'application/xml'
+                }
+                $snapshotResponse = Invoke-RestMethod -Uri $snapshotUri -Method Get -Headers $snapshotHeaders -ErrorAction Stop
+
+                $backup = $null
+                if ($snapshotResponse.history.backup) {
+                    $backup = $snapshotResponse.history.backup
+                }
+                elseif ($snapshotResponse.DocumentElement.backup) {
+                    $backup = $snapshotResponse.DocumentElement.backup
+                }
+                if (-not $backup) {
+                    throw "No snapshots found for connector '$($resolved.Name)' ($connectorGuid)"
+                }
+                if ($backup -is [System.Array]) {
+                    $backup = $backup[0]
+                }
+                $snapshotIdToUse = if ($backup.id) { $backup.id } else { $backup.root }
+                Write-Verbose "Using latest snapshot: $snapshotIdToUse"
+            }
+
+            # Mask the path for the content API
+            # Unlike bsearch (where pathRoot is URL-encoded in a query parameter),
+            # the content API embeds the path in the URL. URL-containing node names
+            # (e.g., SharePoint site URLs) must have internal / escaped to -s.
+            if ($Path -match '^(/[^/]+)/(https?://.+)$') {
+                # Path contains a URL (SharePoint site) — mask prefix normally,
+                # then mask the entire URL as a single tree-node segment
+                $pathPrefix = $Matches[1]
+                $urlSegment = $Matches[2]
+
+                # Mask prefix segment: - → --, : → -c
+                $maskedPrefix = $pathPrefix -replace '(?<!-)-(?!-)', '--'
+                $maskedPrefix = $maskedPrefix -replace ':', '-c'
+
+                # Mask URL as one segment: - → --, : → -c, / → -s
+                $maskedUrl = $urlSegment -replace '(?<!-)-(?!-)', '--'
+                $maskedUrl = $maskedUrl -replace ':', '-c'
+                $maskedUrl = $maskedUrl -replace '/', '-s'
+
+                $maskedPath = "$maskedPrefix/$maskedUrl"
+            }
+            else {
+                # No embedded URL — standard per-segment masking
+                $maskedPath = ConvertTo-MaskedPath -Path $Path
+            }
+            Write-Verbose "Path: $Path -> Masked: $maskedPath"
+
+            # Build the snapshot tree API URL
+            # Endpoint: /history/{snapshotId}/{maskedPath} (no /content segment)
+            $uri = "$baseUrl/users/$userId/devices/$connectorGuid/history/$snapshotIdToUse$maskedPath"
+            Write-Verbose "Request URI: $uri"
+
+            $headers = @{
+                'Authorization' = $authHeader
+                'Accept'        = 'application/xml'
+            }
+
+            $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+
+            # Parse the response into a clean attributes object
+            $attributes = [ordered]@{
+                ConnectorGuid = $connectorGuid
+                ConnectorName = $resolved.Name
+                SnapshotId    = $snapshotIdToUse
+                Path          = $Path
+            }
+
+            # Normalise: if REST returned a raw string, parse it now so the XML branch handles it.
+            if ($response -is [string]) {
+                try   { $response = [xml]$response }
+                catch {
+                    Write-Verbose "Response is not parseable XML, returning raw content"
+                    $attributes['RawContent'] = $response
+                    [PSCustomObject]$attributes
+                    return
+                }
+            }
+
+            if ($response -is [System.Xml.XmlDocument] -or $response -is [System.Xml.XmlElement]) {
+                $root = if ($response -is [System.Xml.XmlDocument]) { $response.DocumentElement } else { $response }
+
+                foreach ($attr in $root.Attributes) {
+                    $attributes[$attr.LocalName] = $attr.Value
+                }
+
+                foreach ($node in $root.ChildNodes) {
+                    $name = $node.LocalName
+                    if (-not $name -or $name -eq '#text') { continue }
+
+                    if ($node.IsEmpty -or [string]::IsNullOrEmpty($node.InnerText)) {
+                        $attributes[$name] = $true
+                    }
+                    elseif ($node.HasChildNodes -and $node.ChildNodes.Count -gt 1) {
+                        $childAttrs = [ordered]@{}
+                        foreach ($child in $node.ChildNodes) {
+                            if ($child.LocalName -and $child.LocalName -ne '#text') {
+                                $childAttrs[$child.LocalName] = if ($child.IsEmpty) { $true } else { $child.InnerText }
+                            }
+                        }
+                        $attributes[$name] = $childAttrs
+                    }
+                    else {
+                        $attributes[$name] = $node.InnerText
+                    }
+                }
+            }
+            else {
+                # PSObject or other type — enumerate properties
+                foreach ($prop in $response.PSObject.Properties) {
+                    $attributes[$prop.Name] = $prop.Value
+                }
+            }
+
+            [PSCustomObject]$attributes
+        }
+        catch {
+            $PSCmdlet.ThrowTerminatingError($_)
+        }
+    }
+}
+
 function ConvertTo-MaskedPath {
     [CmdletBinding()]
     [OutputType([string])]
