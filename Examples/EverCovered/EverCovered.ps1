@@ -74,17 +74,19 @@ $ErrorActionPreference = 'Stop'
 # Module loading
 # ---------------------------------------------------------------------------
 
-$keepitManifest = Join-Path $PSScriptRoot '..' '..' 'src' 'KeepitTools.psd1'
-if (Test-Path $keepitManifest) {
-    Write-Verbose "Loading KeepitTools from '$keepitManifest'"
-    Import-Module $keepitManifest -Force -ErrorAction Stop
-}
-elseif (Get-Module -ListAvailable -Name KeepitTools) {
-    Write-Verbose "Loading KeepitTools from module path"
-    Import-Module KeepitTools -Force -ErrorAction Stop
-}
-else {
-    throw "KeepitTools module not found. Expected it at '$keepitManifest' or installed in the module path."
+if (-not (Get-Module -Name KeepitTools)) {
+    $keepitManifest = Join-Path $PSScriptRoot '..' '..' 'src' 'KeepitTools.psd1'
+    if (Test-Path $keepitManifest) {
+        Write-Verbose "Loading KeepitTools from '$keepitManifest'"
+        Import-Module $keepitManifest -Force -ErrorAction Stop
+    }
+    elseif (Get-Module -ListAvailable -Name KeepitTools) {
+        Write-Verbose "Loading KeepitTools from module path"
+        Import-Module KeepitTools -Force -ErrorAction Stop
+    }
+    else {
+        throw "KeepitTools module not found. Expected it at '$keepitManifest' or installed in the module path."
+    }
 }
 
 # ---------------------------------------------------------------------------
