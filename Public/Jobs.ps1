@@ -409,6 +409,223 @@ function Get-KeepitJobs {
     }
 }
 
+<#
+.SYNOPSIS
+    Retrieves historical job records for a Keepit connector
+.DESCRIPTION
+    Retrieves completed and past backup/restore jobs for a specified Keepit connector
+    using the Keepit job history API (PUT /jobs). Unlike Get-KeepitJobs which returns
+    active and future jobs, this cmdlet is designed for querying the historical record.
+
+    Results can be filtered by type, limited in count, or restricted to failed jobs only.
+.PARAMETER Connector
+    The connector name or GUID to retrieve job history for.
+    Can be piped from Get-KeepitConnector.
+.PARAMETER StartTime
+    Start of the time range for job history. Required by the API.
+.PARAMETER EndTime
+    Optional end of the time range. If omitted, defaults to the current time.
+.PARAMETER Type
+    Optional job type filter. Valid values: 'backup', 'restore'.
+    If not specified, returns all job types.
+.PARAMETER Limit
+    Maximum number of records to return. Valid range: 1-10000.
+    If not specified, the API returns its default limit.
+.PARAMETER FailedOnly
+    Returns only failed jobs. Cannot be combined with other status filters.
+.PARAMETER Raw
+    Returns the raw XML response from the API instead of parsed PowerShell objects.
+    Useful for debugging or when you need the complete API response.
+.EXAMPLE
+    Get-KeepitJobHistory -Connector "Production M365" -StartTime (Get-Date).AddDays(-30)
+
+    Gets all job history for the last 30 days.
+.EXAMPLE
+    Get-KeepitJobHistory -Connector "Production M365" -StartTime "2026-01-01" -EndTime "2026-06-01" -Type backup
+
+    Gets only backup jobs between January 1 and June 1, 2026.
+.EXAMPLE
+    Get-KeepitJobHistory -Connector "abc123" -StartTime (Get-Date).AddDays(-7) -FailedOnly
+
+    Gets only failed jobs from the last 7 days.
+.EXAMPLE
+    Get-KeepitJobHistory -Connector "abc123" -StartTime (Get-Date).AddDays(-30) -Limit 50
+
+    Gets the most recent 50 job history records for the last 30 days.
+.EXAMPLE
+    Get-KeepitConnector | Get-KeepitJobHistory -StartTime (Get-Date).AddDays(-7)
+
+    Gets job history for all connectors over the last 7 days.
+.OUTPUTS
+    PSCustomObject containing job details with properties:
+        - JobGuid: The job GUID
+        - ConnectorGuid: The connector GUID
+        - ConnectorName: The connector name
+        - Type: Job type (backup or restore)
+        - Description: Job description
+        - Active: Boolean indicating if the job is still active
+        - Priority: Job priority
+        - Scheduled: Scheduled start time
+        - Start: Actual start time
+        - Succeeded: Completion time when the job succeeded (null if failed or in progress)
+        - Failed: Completion time when the job failed (null if succeeded or in progress)
+        - Status: Human-readable status: Succeeded, Failed, Active, or Pending
+        - Progress: Job progress as a float (0.0-1.0)
+
+    When -Raw is specified, returns the raw XML response as a string.
+.NOTES
+    Requires an active connection via Connect-KeepitService.
+    Accepts connector objects from Get-KeepitConnector via pipeline.
+    The API requires StartTime (from-time). EndTime defaults to current time if omitted.
+#>
+function Get-KeepitJobHistory {
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('ConnectorGuid', 'Name')]
+        [string]$Connector,
+
+        [Parameter(Mandatory = $true)]
+        [DateTime]$StartTime,
+
+        [DateTime]$EndTime,
+
+        [ValidateSet('backup', 'restore')]
+        [string]$Type,
+
+        [ValidateRange(1, 10000)]
+        [int]$Limit,
+
+        [switch]$FailedOnly,
+
+        [switch]$Raw
+    )
+
+    begin {
+        Write-Verbose "Get-KeepitJobHistory: Initializing"
+
+        # Normalize StartTime to UTC
+        if ($StartTime.Kind -eq [DateTimeKind]::Unspecified) {
+            $StartTime = [DateTime]::SpecifyKind($StartTime, [DateTimeKind]::Utc)
+        }
+        elseif ($StartTime.Kind -eq [DateTimeKind]::Local) {
+            $StartTime = $StartTime.ToUniversalTime()
+        }
+
+        # Normalize EndTime to UTC (default to now if not specified)
+        $hasEndTime = $PSBoundParameters.ContainsKey('EndTime')
+        if ($hasEndTime) {
+            if ($EndTime.Kind -eq [DateTimeKind]::Unspecified) {
+                $EndTime = [DateTime]::SpecifyKind($EndTime, [DateTimeKind]::Utc)
+            }
+            elseif ($EndTime.Kind -eq [DateTimeKind]::Local) {
+                $EndTime = $EndTime.ToUniversalTime()
+            }
+            if ($EndTime -le $StartTime) {
+                throw "EndTime must be greater than StartTime. StartTime: $StartTime, EndTime: $EndTime"
+            }
+        }
+
+        try {
+            $authHeader = Get-AuthHeader
+            $baseUrl = Get-KeepitBaseUrl
+            $userId = Get-KeepitUserId -AuthHeader $authHeader -BaseUrl $baseUrl
+            Write-Verbose "Base URL: $baseUrl, User ID: $userId"
+        }
+        catch {
+            throw
+        }
+    }
+
+    process {
+        try {
+            $resolved = Resolve-KeepitConnectorIdentity -Identity $Connector
+            $connectorGuid = $resolved.ConnectorGuid
+            Write-Verbose "Connector: $($resolved.Name) ($connectorGuid)"
+
+            # Build filter XML body
+            $fromTimeStr = $StartTime.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+            $filterXml = "<filter><from-time>$fromTimeStr</from-time>"
+
+            if ($hasEndTime) {
+                $toTimeStr = $EndTime.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+                $filterXml += "<to-time>$toTimeStr</to-time>"
+            }
+            if ($PSBoundParameters.ContainsKey('Type')) {
+                $filterXml += "<type>$Type</type>"
+            }
+            if ($PSBoundParameters.ContainsKey('Limit')) {
+                $filterXml += "<limit>$Limit</limit>"
+            }
+            if ($FailedOnly) {
+                $filterXml += "<failed-only>true</failed-only>"
+            }
+            $filterXml += "</filter>"
+
+            $uri = "$baseUrl/users/$userId/devices/$connectorGuid/jobs"
+            $headers = @{
+                'Authorization' = $authHeader
+                'Content-Type'  = 'application/xml'
+                'Accept'        = 'application/vnd.keepit.v4+xml'
+            }
+
+            Write-Verbose "Method: PUT, URI: $uri"
+            Write-Verbose "Filter XML: $filterXml"
+
+            if ($Raw) {
+                $webResponse = Invoke-WebRequest -Uri $uri -Method Put -Headers $headers -Body $filterXml -ErrorAction Stop
+                $webResponse.Content
+                return
+            }
+
+            $response = Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -Body $filterXml -ErrorAction Stop
+
+            $jobs = @()
+            if ($response.jobs.job) {
+                $jobs = if ($response.jobs.job -is [System.Array]) { $response.jobs.job } else { @($response.jobs.job) }
+            }
+            Write-Verbose "Found $($jobs.Count) job(s)"
+
+            foreach ($job in $jobs) {
+                $isActive = $job.active -eq 'true' -or $job.active -eq $true
+                $status = if ($job.succeeded) { 'Succeeded' }
+                           elseif ($job.failed) { 'Failed' }
+                           elseif ($isActive) { 'Active' }
+                           else { 'Pending' }
+
+                [PSCustomObject]@{
+                    JobGuid       = if ($job.guid) { $job.guid } else { $null }
+                    ConnectorGuid = $connectorGuid
+                    ConnectorName = $resolved.Name
+                    Type          = if ($job.type) { $job.type } else { 'unknown' }
+                    Description   = if ($job.description) { $job.description } else { '' }
+                    Active        = $isActive
+                    Priority      = if ($job.priority) { $job.priority } else { $null }
+                    Scheduled     = if ($job.scheduled) { $job.scheduled } else { $null }
+                    Start         = if ($job.start) { $job.start } else { $null }
+                    Succeeded     = if ($job.succeeded) { $job.succeeded } else { $null }
+                    Failed        = if ($job.failed) { $job.failed } else { $null }
+                    Status        = $status
+                    Progress      = if ($job.progress) { [double]$job.progress } else { $null }
+                }
+            }
+        }
+        catch {
+            $errorGuid = if ($connectorGuid) { $connectorGuid } else { $Connector }
+            $PSCmdlet.ThrowTerminatingError(
+                [System.Management.Automation.ErrorRecord]::new(
+                    [System.Exception]::new("Failed to retrieve job history for connector '$errorGuid': $($_.Exception.Message)", $_.Exception),
+                    'KeepitJobHistoryError',
+                    [System.Management.Automation.ErrorCategory]::ConnectionError,
+                    $errorGuid
+                )
+            )
+        }
+    }
+}
+
 function Invoke-JobCancellation {
     <#
     .SYNOPSIS

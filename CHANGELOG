@@ -1,5 +1,12 @@
 # KeepitTools Changelog
 
+## Version 1.4.0
+
+- Get-KeepitJobHistory: New cmdlet to retrieve historical job records using the PUT /jobs API
+- Get-KeepitJobHistory: Supports -StartTime (required), -EndTime, -Type, -Limit, -FailedOnly, and -Raw parameters
+- Get-KeepitJobHistory: Output includes Succeeded, Failed, Status, and Progress properties distinct from Get-KeepitJobs
+- Get-KeepitJobHistory: Accepts pipeline input from Get-KeepitConnector
+
 ## Version 1.3.3
 
 - Get-KeepitItemAttributes: New cmdlet to retrieve metadata attributes (e.g. SharePoint protected flag) from the snapshot content API

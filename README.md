@@ -119,6 +119,7 @@ Remove-Module KeepitTools
 | `New-KeepitConnector`              | Creates a new Keepit connector with specified type and config      |
 | `Get-KeepitSnapshot`               | Retrieves snapshot information (latest, range, or count)           |
 | `Get-KeepitJobs`                   | Retrieves active and future backup/restore jobs for a connector    |
+| `Get-KeepitJobHistory`             | Retrieves historical job records for a connector by time range     |
 | `Stop-KeepitJob`                   | Cancels running or scheduled backup/restore jobs                   |
 | `Start-KeepitBackup`               | Starts immediate or scheduled backup job on a connector            |
 | `Search-KeepitSnapshot`            | Searches backup data using the BSearch API                         |
