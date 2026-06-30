@@ -637,8 +637,7 @@ function Invoke-JobCancellation {
         [hashtable]$Headers,
         [string]$ConnectorGuid,
         [string]$ConnectorName,
-        [string]$JobGuid,
-        [string]$JobStatus
+        [string]$JobGuid
     )
 
     $timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
@@ -791,7 +790,7 @@ function Stop-KeepitJob {
                         }
                         $result = Invoke-JobCancellation -Uri $uri -Headers $headers `
                             -ConnectorGuid $connectorGuid -ConnectorName $connectorName `
-                            -JobGuid $job.JobGuid -JobStatus $job.Type
+                            -JobGuid $job.JobGuid
                         if ($result._Exception) {
                             Write-Error "Failed to cancel job $($job.JobGuid): $($result._ErrorMessage)"
                             # Remove internal properties before outputting
@@ -814,7 +813,7 @@ function Stop-KeepitJob {
                     }
                     $result = Invoke-JobCancellation -Uri $uri -Headers $headers `
                         -ConnectorGuid $connectorGuid -ConnectorName $connectorName `
-                        -JobGuid $JobGuid -JobStatus 'single'
+                        -JobGuid $JobGuid
                     if ($result._Exception) {
                         $ex = $result._Exception
                         $msg = $result._ErrorMessage
@@ -865,6 +864,7 @@ function New-AlreadyQueuedResult {
 
     [PSCustomObject]@{
         ConnectorGuid        = $ConnectorGuid
+        ConnectorName        = $ConnectorName
         Type                 = 'backup'
         Description          = 'Job creation skipped'
         Status               = $Status

@@ -1,4 +1,4 @@
-# --- Restore job XML size constants ---
+﻿# --- Restore job XML size constants ---
 $XmlOverheadPerItem = 400       # Approximate XML overhead bytes per restore item element
 $XmlBaseOverhead    = 13        # Base XML element overhead bytes (<Path></Path> tags)
 $MaxXmlBatchSize    = 61440     # Maximum XML batch size (60KB) for API submission
@@ -578,6 +578,7 @@ function Resolve-RestoreJobPlan {
 #>
 function Restore-KeepitBulkDeletedItems {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Public API name; renaming would be a breaking change')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Intentional: WhatIf and diagnostic output uses Write-Host for colored console formatting')]
     [CmdletBinding(SupportsShouldProcess)]
     [OutputType([PSCustomObject])]
     param(
@@ -1395,6 +1396,7 @@ function Convert-KeepitGuidToUPN {
     One restore job is created per unique snapshot timestamp to optimize the restore process.
 #>
 function Start-KeepitExpressRestore {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Intentional: WhatIf and diagnostic output uses Write-Host for colored console formatting')]
     [CmdletBinding(SupportsShouldProcess)]
     [OutputType([PSCustomObject])]
     param(
@@ -1524,7 +1526,6 @@ function Start-KeepitExpressRestore {
                         -Items $calendarItems `
                         -ConnectorGuid $connectorGuid `
                         -Label "Calendar" `
-                        -UserPrincipalName $UserPrincipalName `
                         -ShowJobs:$ShowJobs `
                         -PSCmdlet $PSCmdlet
                     if ($WhatIfPreference) {
@@ -1580,7 +1581,6 @@ function Start-KeepitExpressRestore {
                     -Items $mailItems `
                     -ConnectorGuid $connectorGuid `
                     -Label $mailLabel `
-                    -UserPrincipalName $UserPrincipalName `
                     -ShowJobs:$ShowJobs `
                     -PSCmdlet $PSCmdlet
                 if ($WhatIfPreference) {
@@ -1725,6 +1725,7 @@ function Start-KeepitExpressRestore {
 #>
 function Submit-ExpressRestoreJobs {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Internal helper; plural accurately describes submitting multiple jobs')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Intentional: WhatIf and diagnostic output uses Write-Host for colored console formatting')]
     [CmdletBinding(SupportsShouldProcess)]
     [OutputType([PSCustomObject[]])]
     param(
@@ -1736,9 +1737,6 @@ function Submit-ExpressRestoreJobs {
 
         [Parameter(Mandatory = $true)]
         [string]$Label,
-
-        [Parameter(Mandatory = $true)]
-        [string]$UserPrincipalName,
 
         [Parameter(Mandatory = $false)]
         [switch]$ShowJobs,

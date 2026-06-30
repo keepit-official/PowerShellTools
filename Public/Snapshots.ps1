@@ -1,4 +1,4 @@
-# Keepit API page size limit. The API returns pagesize-1 results, so we request 99+1=100 to get 99 results per page.
+﻿# Keepit API page size limit. The API returns pagesize-1 results, so we request 99+1=100 to get 99 results per page.
 $script:ApiPageSize = 99
 
 <#
@@ -66,6 +66,8 @@ $script:ApiPageSize = 99
     Returns up to $script:ApiPageSize snapshots by default. Use -ResultSize to change this limit or specify "unlimited".
 #>
 function Get-KeepitSnapshot {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'Latest', Justification = 'Used implicitly as ParameterSetName selector')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'CountOnly', Justification = 'Used implicitly as ParameterSetName selector')]
     [CmdletBinding(DefaultParameterSetName = 'Latest')]
     [OutputType([PSCustomObject])]
     param(

@@ -1,5 +1,14 @@
 # KeepitTools Changelog
 
+## Version 1.4.2
+
+- Fix all remaining PSScriptAnalyzer warnings for a clean PSGallery listing
+- Remove unused parameters: JobStatus (Invoke-JobCancellation), UserPrincipalName (Submit-ExpressRestoreJobs), FullConfig (Get-SharePointCoverage, Get-UnifiedGroupsCoverage)
+- Add ConnectorName to New-AlreadyQueuedResult output object
+- Suppress PSAvoidUsingWriteHost on WhatIf/diagnostic output functions (intentional colored console output)
+- Suppress PSReviewUnusedParameter on Get-KeepitSnapshot switches used via ParameterSetName
+- Add UTF-8 BOM to Restore.ps1, Snapshots.ps1, and Connectors.ps1
+
 ## Version 1.4.1
 
 - Fix PSScriptAnalyzer PSGallery warnings across module source files

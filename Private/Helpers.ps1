@@ -372,10 +372,7 @@ function Get-SharePointCoverage {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [hashtable]$Config,
-
-        [Parameter(Mandatory = $true)]
-        [hashtable]$FullConfig
+        [hashtable]$Config
     )
 
     $results = @()
@@ -552,10 +549,7 @@ function Get-UnifiedGroupsCoverage {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [hashtable]$Config,
-
-        [Parameter(Mandatory = $true)]
-        [hashtable]$FullConfig
+        [hashtable]$Config
     )
 
     $autoInclude = if ($Config.ContainsKey('AutoIncludeGroups')) {

@@ -1,4 +1,4 @@
-# ---------------------------------------------------------------------------
+﻿# ---------------------------------------------------------------------------
 # Private helpers for Set-KeepitConnectorConfiguration add/remove list logic
 # ---------------------------------------------------------------------------
 
@@ -853,10 +853,10 @@ function Get-KeepitConnectorConfiguration {
                         $workloadConfig = $fullConfig[$jsonKey]
 
                         $coverageResult = switch ($jsonKey) {
-                            'SharePointNG'  { Get-SharePointCoverage -Config $workloadConfig -FullConfig $fullConfig }
+                            'SharePointNG'  { Get-SharePointCoverage -Config $workloadConfig }
                             'Exchange'      { Get-ExchangeCoverage -Config $workloadConfig -FullConfig $fullConfig }
                             'OneDriveSP'    { Get-OneDriveCoverage -Config $workloadConfig -FullConfig $fullConfig }
-                            'UnifiedGroups' { Get-UnifiedGroupsCoverage -Config $workloadConfig -FullConfig $fullConfig }
+                            'UnifiedGroups' { Get-UnifiedGroupsCoverage -Config $workloadConfig }
                             default {
                                 Write-Warning "Coverage is not supported for workload '$w'"
                                 , @()

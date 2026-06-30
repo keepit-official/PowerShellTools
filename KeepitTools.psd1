@@ -3,7 +3,7 @@
     RootModule = 'KeepitTools.psm1'
 
     # Version number of this module
-    ModuleVersion = '1.4.1'
+    ModuleVersion = '1.4.2'
 
     # Supported PSEditions
     CompatiblePSEditions = @('Core')
@@ -129,6 +129,14 @@
 
             # ReleaseNotes of this module
             ReleaseNotes = @'
+Version 1.4.2
+- Fix all remaining PSScriptAnalyzer warnings for a clean PSGallery listing
+- Remove unused parameters: JobStatus (Invoke-JobCancellation), UserPrincipalName (Submit-ExpressRestoreJobs), FullConfig (Get-SharePointCoverage, Get-UnifiedGroupsCoverage)
+- Add ConnectorName to New-AlreadyQueuedResult output object
+- Suppress PSAvoidUsingWriteHost on WhatIf/diagnostic output functions (intentional colored console output)
+- Suppress PSReviewUnusedParameter on Get-KeepitSnapshot switches used via ParameterSetName
+- Add UTF-8 BOM to Restore.ps1, Snapshots.ps1, and Connectors.ps1
+
 Version 1.4.1
 - Fix PSScriptAnalyzer PSGallery warnings across module source files
 - Add LicenseUri and ProjectUri to module manifest
@@ -267,61 +275,7 @@ Version 0.7.1
 - All DateTime.ToString() calls now use InvariantCulture for consistent ISO 8601 output
 - Add unit tests for ConvertTo-KeepitTimestamp culture-invariant behavior
 
-Version 0.7.0
-- Restore-KeepitBulkDeletedItems: Add Entra ID user restore support with correct XML configuration
-- Restore-KeepitBulkDeletedItems: Fix CSV pipeline to correctly restore each user (not just first)
-- Restore-KeepitBulkDeletedItems: Handle recreated users by filtering on UPN instead of GUID
-- Start-KeepitBackup: Replace Scheduled with CreatedAt in output
-- Start-KeepitBackup: Remove Priority and JobGuid from output
-- Start-KeepitBackup: Gracefully handle Entra connectors returning empty response
-- Start-KeepitBackup: Gracefully handle RUNNING_JOB error when backup already in progress
-- Search-KeepitSnapshot: Fix DeletedOnly for Entra connectors (client-side filtering)
-- Search-KeepitSnapshot: Add ItemType derivation from contentType
-- Search-KeepitSnapshot: Fix IsDeleted detection for empty XML tags
-- Search-KeepitSnapshot: Add Entra ID pathroot validation
-- Search-KeepitSnapshot: Change -Recursive to switch parameter (default false)
-- Get-KeepitSnapshot: Add ConnectorName to output
-- Get-KeepitJobs: Add ConnectorName to output
-- Standardize path parameter naming to RootPath across all cmdlets
-- Standardize connector parameter naming to Connector across all cmdlets
-
-Version 0.5.6
-- Search-KeepitSnapshot: Fixed DateTime parsing to treat ISO8601 timestamps as UTC
-- Search-KeepitSnapshot: Renamed SnaptimeFrom/SnaptimeTo to StartTime/EndTime
-- Search-KeepitSnapshot: Same-date StartTime/EndTime now searches entire day
-
-Version 0.5.5
-- Get-KeepitSnapshot: Fixed date range query to make EndDate inclusive
-
-Version 0.5.0
-- Submit-KeepitJob: Low-level cmdlet to submit backup/restore jobs with raw XML configuration
-- Restore-KeepitBulkDeletedItems: High-level cmdlet for bulk restore of deleted email items
-- Search-KeepitSnapshot: Added -DeletedOnly parameter, changed -Recursive default to $true
-- Get-KeepitSnapshot: Added ResultSize parameter with pagination support
-
-Version 0.0.4
-- Get-KeepitConnectorConfiguration: Retrieve connector configuration and custom attributes
-- Enable-KeepitConnector: Enable a disabled connector
-- Disable-KeepitConnector: Disable a connector
-- Get-KeepitConnector: Added display name support for -Type parameter
-
-Version 0.0.3 (Initial Release)
-- Connect-KeepitService: Establish authenticated connection to Keepit platform
-- Disconnect-KeepitService: Clean up session and cached credentials
-- Get-KeepitConnector: Retrieve all accessible Office 365 connectors
-- Get-KeepitSnapshot: Retrieve snapshot information (latest, range, or count)
-- Get-KeepitJobs: Retrieve backup and restore jobs for connectors
-- Start-KeepitBackup: Start immediate or scheduled backup jobs on connectors
-
-Features:
-- Cross-platform support (Windows, macOS, Linux)
-- Secure credential handling using PSCredential
-- Support for all Keepit data center environments
-- Flexible authentication (cached or per-call credentials)
-- Full pipeline support for efficient workflows
-- Immediate and scheduled backup job creation
-- Job monitoring and filtering by type
-- Bulk restore with job coalescing by snapshot
+See CHANGELOG in the repository for full version history prior to 0.7.1.
 '@
 
             # Prerelease string of this module
