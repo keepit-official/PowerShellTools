@@ -50,6 +50,7 @@ function Add-ToConfigStringList {
     If the section or list key does not exist, warns for every item.
 #>
 function Remove-FromConfigStringList {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper; mutates an in-memory list, not system state')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][hashtable]$Section,
@@ -129,6 +130,7 @@ function Add-ToSiteCollectionList {
     Removes site collection objects from SiteCollections by URL match.
 #>
 function Remove-FromSiteCollectionList {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper; mutates an in-memory list, not system state')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][hashtable]$Section,

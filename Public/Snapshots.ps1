@@ -811,7 +811,7 @@ function Search-KeepitSnapshot {
                     }
                 }
             }
-            catch { }
+            catch { Write-Verbose "Could not convert XML node value to string; returning null" }
             return $null
         }
     }
@@ -1510,7 +1510,6 @@ function Search-KeepitSnapshot {
         catch {
             # Handle specific HTTP errors with cleaner messages
             $statusCode = $null
-            $errorDetail = $null
             $exceptionMessage = $_.Exception.Message
 
             # Try multiple methods to extract status code
@@ -1524,11 +1523,6 @@ function Search-KeepitSnapshot {
             # Fallback: extract status code from exception message (e.g., "404 (Not Found)")
             if (-not $statusCode -and $exceptionMessage -match '\b(4\d{2}|5\d{2})\b') {
                 $statusCode = [int]$Matches[1]
-            }
-
-            # Try to extract error details from ErrorDetails
-            if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
-                $errorDetail = $_.ErrorDetails.Message
             }
 
             # Handle 404 Not Found - path doesn't exist
@@ -1567,6 +1561,7 @@ function Search-KeepitSnapshot {
     String - The masked path
 #>
 function Get-KeepitItemAttributes {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Public API name; renaming would be a breaking change')]
     <#
     .SYNOPSIS
         Retrieves metadata attributes for an item in the Keepit backup snapshot tree.

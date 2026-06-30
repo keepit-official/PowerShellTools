@@ -47,7 +47,7 @@ if ($Credential)  { $connectParams['Credential']  = $Credential }
 if ($Environment) { $connectParams['Environment'] = $Environment }
 
 try {
-    $envName = Connect-KeepitInteractive @connectParams
+    Connect-KeepitInteractive @connectParams | Out-Null
 }
 catch {
     Write-Error $_.Exception.Message

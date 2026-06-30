@@ -1,5 +1,11 @@
 # KeepitTools Changelog
 
+## Version 1.4.1
+
+- Fix PSScriptAnalyzer PSGallery warnings across module source files
+- Add LicenseUri and ProjectUri to module manifest
+- Update copyright year to 2026
+
 ## Version 1.4.0
 
 - Get-KeepitJobHistory: New cmdlet to retrieve historical job records using the PUT /jobs API

@@ -89,7 +89,7 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 
 if (-not (Get-Module -Name KeepitTools)) {
-    $keepitManifest = Join-Path $PSScriptRoot '..' '..' 'src' 'KeepitTools.psd1'
+    $keepitManifest = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath '..', 'src', 'KeepitTools.psd1'
     if (Test-Path $keepitManifest) {
         Write-Verbose "Loading KeepitTools from '$keepitManifest'"
         Import-Module $keepitManifest -Force -ErrorAction Stop
@@ -220,6 +220,7 @@ $siteTable = [System.Collections.Generic.Dictionary[string, pscustomobject]]::ne
 )
 
 function Update-SiteEntry {
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [System.Collections.Generic.Dictionary[string, pscustomobject]]$Table,
         [string]$Url,
@@ -229,6 +230,7 @@ function Update-SiteEntry {
         [string]$ConnectorName
     )
     if ([string]::IsNullOrWhiteSpace($Url)) { return }
+    if (-not $PSCmdlet.ShouldProcess($Url, 'Update site entry')) { return }
 
     $existing = $null
     if ($Table.TryGetValue($Url, [ref]$existing)) {

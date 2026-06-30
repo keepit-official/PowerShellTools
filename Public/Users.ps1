@@ -466,6 +466,7 @@ function Get-KeepitUser {
     Requires an active connection via Connect-KeepitService.
 #>
 function Get-KeepitRoles {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Public API name; renaming would be a breaking change')]
     [CmdletBinding()]
     [OutputType([PSCustomObject])]
     param()

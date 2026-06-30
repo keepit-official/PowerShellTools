@@ -9,6 +9,7 @@
     String - Base64 encoded authentication header value
 #>
 function New-AuthHeader {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper; constructs an in-memory auth string only')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]

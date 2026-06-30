@@ -105,6 +105,7 @@
     If StartTime and EndTime are the same day, the range is expanded to cover the full day (00:00:00 to 23:59:59).
 #>
 function Get-KeepitJobs {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Public API name; renaming would be a breaking change')]
     [CmdletBinding()]
     [OutputType([PSCustomObject])]
     param(
@@ -660,7 +661,7 @@ function Invoke-JobCancellation {
                 $errorXml = [xml]$_.ErrorDetails.Message
                 $errorMessage = "$($errorXml.error.code): $($errorXml.error.description)"
             }
-            catch { }
+            catch { Write-Verbose "Could not parse error response XML; using raw exception message" }
         }
         # Return error info; let the caller decide whether to Write-Error or throw
         [PSCustomObject]@{
@@ -847,6 +848,7 @@ function Stop-KeepitJob {
 }
 
 function New-AlreadyQueuedResult {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper; creates an in-memory result object only')]
     <#
     .SYNOPSIS
         Creates a status object for WAITING_JOB_TO_START or RUNNING_JOB API errors.

@@ -3,7 +3,7 @@
     RootModule = 'KeepitTools.psm1'
 
     # Version number of this module
-    ModuleVersion = '1.4.0'
+    ModuleVersion = '1.4.1'
 
     # Supported PSEditions
     CompatiblePSEditions = @('Core')
@@ -18,7 +18,7 @@
     CompanyName = 'Keepit'
 
     # Copyright statement for this module
-    Copyright = '(c) 2025 Keepit. All rights reserved.'
+    Copyright = '(c) 2026 Keepit. All rights reserved.'
 
     # Description of the functionality provided by this module
     Description = 'PowerShell module for mass restore of deleted email items from Keepit backups. Provides cmdlets to connect to the Keepit platform API, search for deleted items within a date range, and perform bulk restore operations with job coalescing by snapshot.'
@@ -119,16 +119,46 @@
             Tags = @('Keepit', 'Backup', 'Restore', 'Email', 'Exchange', 'M365', 'Office365')
 
             # A URL to the license for this module.
-            # LicenseUri = ''
+            LicenseUri = 'https://github.com/keepit-official/PowerShellTools/blob/main/LICENSE.md'
 
             # A URL to the main website for this project.
-            # ProjectUri = ''
+            ProjectUri = 'https://github.com/keepit-official/PowerShellTools'
 
             # A URL to an icon representing this module.
             # IconUri = ''
 
             # ReleaseNotes of this module
             ReleaseNotes = @'
+Version 1.4.1
+- Fix PSScriptAnalyzer PSGallery warnings across module source files
+- Add LicenseUri and ProjectUri to module manifest
+- Update copyright year to 2026
+
+Version 1.4.0
+- Get-KeepitJobHistory: New cmdlet to retrieve historical job records using the PUT /jobs API
+- Get-KeepitJobHistory: Supports -StartTime (required), -EndTime, -Type, -Limit, -FailedOnly, and -Raw parameters
+- Get-KeepitJobHistory: Output includes Succeeded, Failed, Status, and Progress properties distinct from Get-KeepitJobs
+- Get-KeepitJobHistory: Accepts pipeline input from Get-KeepitConnector
+
+Version 1.3.3
+- Get-KeepitItemAttributes: New cmdlet to retrieve metadata attributes (e.g. SharePoint protected flag) from the snapshot content API
+- Search-KeepitSnapshot: Improve kng:meta element parsing to extract key/value pairs and boolean flags
+- New-KeepitConnector: Fix connector creation to embed required standard attributes in create XML and enable via PUT instead of POST
+- New-KeepitConnector: Fix attribute Content-Type from application/octet-stream to text/plain
+- New-KeepitConnector: Reinforce attributes via individual PUT calls after enable
+- New-KeepitConnector: Refactor standard attributes to single ordered hashtable (eliminates duplicate definition)
+- New-KeepitConnector: Replace Invoke-WebRequest enable call with Invoke-RestMethod
+- Get-KeepitItemAttributes: Collapse duplicate XML parsing branches; normalise string response to [xml] before dispatch
+
+Version 1.3.2
+- Restore-KeepitBulkDeletedItems: Add -SearchTerms parameter for filtering deleted items by sender, recipient, or content before restoring
+- Search-KeepitSnapshot: Update Entra ID RootPath validation to use display names instead of old API-style short names
+- Move Enable-KeepitConnector and Disable-KeepitConnector to ConnectorState.ps1; excluded from public module per support team request
+- Fix security audit findings SEC-1 through SEC-5
+
+Version 1.3.1
+- Convert-KeepitUPNToGuid: Fix double-dash GUID bug where dashes were pre-escaped before ConvertTo-MaskedPath, resulting in quadruple dashes and failed searches
+
 Version 1.3.0
 - Start-KeepitExpressRestore: New cmdlet for express restore of recent user data by time window (Experimental)
 - Start-KeepitExpressRestore: Support Exchange workload with -PrioritizeCalendar and -InboxOnly switches

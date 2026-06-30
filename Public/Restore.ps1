@@ -286,6 +286,7 @@ function Get-RestoreItemsXmlSize {
     This is an internal helper function not exported from the module.
 #>
 function Split-RestoreItemsBatches {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Internal helper; plural accurately describes returning multiple batches')]
     [CmdletBinding()]
     [OutputType([PSCustomObject])]
     param(
@@ -348,6 +349,7 @@ function Split-RestoreItemsBatches {
     This is an internal helper function not exported from the module.
 #>
 function New-RestoreJobXml {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper; constructs an in-memory XML string only')]
     [CmdletBinding()]
     [OutputType([string])]
     param(
@@ -575,6 +577,7 @@ function Resolve-RestoreJobPlan {
     One restore job is created per unique snapshot timestamp to optimize the restore process.
 #>
 function Restore-KeepitBulkDeletedItems {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Public API name; renaming would be a breaking change')]
     [CmdletBinding(SupportsShouldProcess)]
     [OutputType([PSCustomObject])]
     param(
@@ -1721,6 +1724,7 @@ function Start-KeepitExpressRestore {
     This is an internal helper function not exported from the module.
 #>
 function Submit-ExpressRestoreJobs {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Internal helper; plural accurately describes submitting multiple jobs')]
     [CmdletBinding(SupportsShouldProcess)]
     [OutputType([PSCustomObject[]])]
     param(

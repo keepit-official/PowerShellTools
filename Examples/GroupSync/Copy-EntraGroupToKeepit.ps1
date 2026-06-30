@@ -99,7 +99,7 @@ if (-not (Get-Module -ListAvailable -Name 'Microsoft.Graph.Groups')) {
 }
 Import-Module Microsoft.Graph.Groups -ErrorAction Stop
 
-$keepitManifest = Join-Path $PSScriptRoot '..' '..' 'src' 'KeepitTools.psd1'
+$keepitManifest = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath '..', 'src', 'KeepitTools.psd1'
 if (-not (Test-Path $keepitManifest)) {
     throw "KeepitTools module not found at '$keepitManifest'. " +
         "Ensure the module is present at src/KeepitTools.psd1 relative to the repository root."
