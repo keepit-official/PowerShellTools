@@ -1,0 +1,43 @@
+name: Publish to PowerShell Gallery
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Publish KeepitTools to PSGallery if version changed
+        shell: pwsh
+        env:
+          NUGET_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
+        run: |
+          $manifest = Import-PowerShellDataFile -Path 'KeepitTools.psd1'
+          $localVersion = [version]$manifest.ModuleVersion
+
+          $published = $null
+          try {
+            $published = (Find-Module -Name 'KeepitTools' -Repository PSGallery -ErrorAction Stop).Version
+          } catch {
+            Write-Host 'KeepitTools is not yet published on PSGallery.'
+          }
+
+          if ($published -and $localVersion -le $published) {
+            Write-Host "Local version $localVersion is not newer than published version $published. Skipping publish."
+            exit 0
+          }
+
+          Write-Host "Publishing KeepitTools $localVersion to PSGallery (previously published: $published)."
+
+          $stagingDir = Join-Path ([System.IO.Path]::GetTempPath()) 'KeepitTools'
+          if (Test-Path $stagingDir) { Remove-Item $stagingDir -Recurse -Force }
+          New-Item -ItemType Directory -Path $stagingDir | Out-Null
+
+          Copy-Item -Path 'KeepitTools.psd1', 'KeepitTools.psm1', 'CHANGELOG', 'README.md' -Destination $stagingDir
+          Copy-Item -Path 'Public', 'Private' -Destination $stagingDir -Recurse
+
+          Publish-Module -Path $stagingDir -NuGetApiKey $env:NUGET_API_KEY -Repository PSGallery
