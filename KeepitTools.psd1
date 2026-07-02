@@ -21,7 +21,7 @@
     Copyright = '(c) 2026 Keepit. All rights reserved.'
 
     # Description of the functionality provided by this module
-    Description = 'PowerShell module for mass restore of deleted email items from Keepit backups. Provides cmdlets to connect to the Keepit platform API, search for deleted items within a date range, and perform bulk restore operations with job coalescing by snapshot.'
+    Description = 'PowerShell module for the Keepit backup platform. Provides cmdlets to connect to the Keepit API; manage connectors, backup jobs, and users; search and bulk-restore deleted Exchange email and OneDrive files with job coalescing by snapshot; and work with audit logs and secure sharing links.'
 
     # Minimum version of the PowerShell engine required by this module
     PowerShellVersion = '7.0'

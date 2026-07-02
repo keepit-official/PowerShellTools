@@ -14,11 +14,24 @@ In addition, this module provides cmdlets to perform restores of large numbers o
 
 ### Installation
 
-The module can be installed by copying the module files to a PowerShell module path or by importing directly from the source directory. (it will eventually be in the PowerShell gallery!)
+The module is published on the [PowerShell Gallery](https://www.powershellgallery.com/packages/KeepitTools) as `KeepitTools`. It can also be installed by copying the module files to a PowerShell module path or by importing directly from the source directory.
 
-> **Note:** `Install-Module` only works with modules published to PowerShell repositories (like the PowerShell Gallery). For local module files, use `Import-Module` or manually copy to your module path as shown below.
+#### Option 1: Install from PowerShell Gallery
 
-#### Option 1: Import from Source Directory
+This is the recommended method for most users:
+
+```powershell
+# Using PowerShellGet
+Install-Module -Name KeepitTools -Scope CurrentUser
+
+# Or using PSResourceGet
+Install-PSResource -Name KeepitTools -Scope CurrentUser
+
+# Import the module
+Import-Module KeepitTools
+```
+
+#### Option 2: Import from Source Directory
 
 This is the recommended method for development and testing:
 
@@ -31,7 +44,7 @@ Import-Module ./KeepitTools.psd1 -Force
 Get-Module KeepitTools
 ```
 
-#### Option 2: Install to User Module Path
+#### Option 3: Install to User Module Path
 
 For permanent installation, copy the module to your PowerShell modules directory:
 
