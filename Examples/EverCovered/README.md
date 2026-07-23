@@ -91,13 +91,17 @@ data backed up across one or all Keepit Microsoft 365 connectors.
 
 Two BSearch API calls are made per connector:
 
-1. **Active sites** — site collections currently in backup scope
-2. **Deleted sites** — site collections previously backed up but since removed
+1. **All sites** — not filtered on deleted state, so it returns both in-scope
+   and removed site collections
+2. **Deleted sites** — normally a subset of the first call, kept as a safety net
+   for connector types whose unfiltered search excludes deleted entries
 
-When scanning multiple connectors, results are deduplicated by site URL.
-`Active` status always takes precedence over `Removed` for the same site;
-for the same status, the most recent timestamp wins. The `Connector` column
-records which connector provided the authoritative data for each site.
+Each site's `Status` is taken from that entry's own `IsDeleted` flag, not from
+which call returned it. When scanning multiple connectors, results are
+deduplicated by site URL. `Active` status always takes precedence over `Removed`
+for the same site; for the same status, the most recent timestamp wins. The
+`Connector` column records which connector provided the authoritative data for
+each site.
 
 The script reuses an existing `Connect-KeepitService` session when one is
 present, so no credentials are needed if you are already connected.
@@ -127,6 +131,7 @@ CSV file with one row per unique site URL:
 | `SiteURL`     | Full SharePoint site URL                                                                           |
 | `LastSeenDate`| Timestamp of the most recent backup in which this site appeared                                    |
 | `Status`      | `Active` — currently in backup scope; `Removed` — previously backed up but no longer in scope      |
+| `Protected`   | `True` — the site carries the Keepit `protected` flag; `False` — it does not                       |
 | `Connector`   | Name of the connector that provided the most recent (or authoritative) data for this site          |
 
 ### Examples
@@ -154,6 +159,13 @@ Import-Csv .\EverCovered-Sites-All-2026-05-07.csv |
     Select-Object SiteURL, LastSeenDate, Connector
 ```
 
+```powershell
+# Find sites that are in scope but not protected
+Import-Csv .\EverCovered-Sites-All-2026-05-07.csv |
+    Where-Object { $_.Status -eq 'Active' -and $_.Protected -eq 'False' } |
+    Select-Object SiteURL, LastSeenDate, Connector
+```
+
 ### Notes
 
 - Sites are deduplicated by URL (case-insensitive) across connectors. If a site
@@ -162,3 +174,8 @@ Import-Csv .\EverCovered-Sites-All-2026-05-07.csv |
 - `LastSeenDate` reflects the `Updated` timestamp from the BSearch API.
 - Sites that appear in neither active nor deleted results for any connector will
   not appear in the report.
+- `Protected` is derived from the BSearch `protected` metadata key, which the API
+  returns as an empty element (`<kng:meta key="protected"/>`). Presence of the key
+  means protected; there is no explicit false value, so absence is reported as
+  `False`. When a site is seen on multiple connectors, `Protected` comes from the
+  same observation that supplied `LastSeenDate` and `Connector`.

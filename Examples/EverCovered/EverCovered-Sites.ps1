@@ -4,16 +4,22 @@
 .DESCRIPTION
     Searches one or all o365-admin connectors for every SharePoint site collection
     that has ever had data backed up. Output is a CSV file containing the site URL,
-    display name, most recent backup timestamp, current status, and connector name.
+    display name, most recent backup timestamp, current status, protection state,
+    and connector name.
 
     By default all o365-admin connectors in the tenant are scanned and results are
     deduplicated by site URL across connectors.  Use -Connector to scope the report
     to a single connector.
 
     Two BSearch API calls are made per connector:
-      1. Active   sites directly under /SharePoint (currently in backup scope).
-      2. Deleted  sites directly under /SharePoint (removed from backup scope).
-    A site is included when it appears in either result set.
+      1. All      sites directly under /SharePoint. This call is not filtered on
+                  deleted state, so it returns removed sites as well as in-scope
+                  ones.
+      2. Deleted  sites directly under /SharePoint. Normally a subset of the first
+                  call, retained as a safety net for connector types whose
+                  unfiltered search excludes deleted entries.
+    A site is included when it appears in either result set. Each site's Status is
+    taken from that entry's own IsDeleted flag, not from which call returned it.
     LastSeenDate reflects the most recent backup timestamp for each site.
 
     The script reuses an existing Connect-KeepitService session when one is
@@ -57,6 +63,8 @@
         - Status       : Active   — site is currently in backup scope
                          Removed  — site was previously backed up but has since
                                     been deleted or removed from backup scope
+        - Protected    : True  — site carries the Keepit 'protected' flag
+                         False — site does not carry the flag
         - Connector    : Name of the connector that provided the most recent data
 .NOTES
     Requires the KeepitTools module at ../../src/KeepitTools.psd1 (repository
@@ -213,8 +221,28 @@ function Get-SiteUrlFromEntry {
     return $Entry.Name
 }
 
+function Get-SiteStatusFromEntry {
+    param($Entry)
+    # Status must come from the entry's own IsDeleted flag rather than from which
+    # search returned it. The first search is not filtered on deleted state, so it
+    # returns removed sites too; treating everything it returns as Active would
+    # mask exactly the sites this report exists to surface.
+    if ($Entry.IsDeleted) { return 'Removed' }
+    return 'Active'
+}
+
+function Get-ProtectedFlagFromEntry {
+    param($Entry)
+    # BSearch exposes protection as an empty element, <kng:meta key="protected"/>,
+    # which Search-KeepitSnapshot surfaces as Metadata['protected'] = $true.
+    # There is no explicit false value: absence of the key means "not protected",
+    # so test for the key rather than comparing its value.
+    if ($null -eq $Entry.Metadata) { return $false }
+    return $Entry.Metadata.ContainsKey('protected')
+}
+
 # Key   = site URL (unmasked, unique per site)
-# Value = PSCustomObject { SiteName, LastSeen, Status, Connector }
+# Value = PSCustomObject { SiteName, LastSeen, Status, Protected, Connector }
 $siteTable = [System.Collections.Generic.Dictionary[string, pscustomobject]]::new(
     [System.StringComparer]::OrdinalIgnoreCase
 )
@@ -227,6 +255,7 @@ function Update-SiteEntry {
         [string]$Name,
         [string]$Timestamp,
         [string]$Status,
+        [bool]$Protected,
         [string]$ConnectorName
     )
     if ([string]::IsNullOrWhiteSpace($Url)) { return }
@@ -255,11 +284,13 @@ function Update-SiteEntry {
             # Active always beats Removed; adopt this connector as authoritative
             $existing.Status    = 'Active'
             $existing.LastSeen  = $Timestamp
+            $existing.Protected = $Protected
             $existing.Connector = $ConnectorName
         }
         elseif ($isNewer -and $Status -eq $existing.Status) {
             # Same status, newer timestamp: update to more recent observation
             $existing.LastSeen  = $Timestamp
+            $existing.Protected = $Protected
             $existing.Connector = $ConnectorName
         }
     }
@@ -268,6 +299,7 @@ function Update-SiteEntry {
             SiteName  = $Name
             LastSeen  = $Timestamp
             Status    = $Status
+            Protected = $Protected
             Connector = $ConnectorName
         }
     }
@@ -280,8 +312,9 @@ function Update-SiteEntry {
 foreach ($conn in $connectorsToScan) {
     Write-Host "Scanning '$($conn.Name)'..."
 
-    # Active sites
-    Write-Progress -Activity "Scanning '$($conn.Name)'" -Status 'Searching active SharePoint sites...'
+    # All sites. This search is not filtered on deleted state, so it returns both
+    # in-scope and removed sites; each entry's own IsDeleted flag decides its status.
+    Write-Progress -Activity "Scanning '$($conn.Name)'" -Status 'Searching SharePoint sites...'
     try {
         $activeSites = @(
             Search-KeepitSnapshot -Connector $conn.ConnectorGuid `
@@ -296,9 +329,11 @@ foreach ($conn in $connectorsToScan) {
         Write-Warning "Active site search failed on '$($conn.Name)' (skipping): $($_.Exception.Message)"
         continue
     }
-    Write-Verbose "'$($conn.Name)': $($activeSites.Count) active SharePoint entry/entries."
+    Write-Verbose "'$($conn.Name)': $($activeSites.Count) SharePoint entry/entries."
 
-    # Deleted sites
+    # Deleted sites. Normally a subset of the search above, kept as a safety net for
+    # connector types whose unfiltered search excludes deleted entries. Duplicates
+    # are harmless: they merge on URL and resolve to the same IsDeleted status.
     Write-Progress -Activity "Scanning '$($conn.Name)'" -Status 'Searching deleted SharePoint sites...'
     try {
         $deletedSites = @(
@@ -323,16 +358,13 @@ foreach ($conn in $connectorsToScan) {
         continue
     }
 
-    foreach ($entry in $activeSites) {
+    foreach ($entry in @($activeSites) + @($deletedSites)) {
         $url = Get-SiteUrlFromEntry -Entry $entry
         Update-SiteEntry -Table $siteTable -Url $url -Name $entry.Name `
-            -Timestamp $entry.Updated -Status 'Active' -ConnectorName $conn.Name
-    }
-
-    foreach ($entry in $deletedSites) {
-        $url = Get-SiteUrlFromEntry -Entry $entry
-        Update-SiteEntry -Table $siteTable -Url $url -Name $entry.Name `
-            -Timestamp $entry.Updated -Status 'Removed' -ConnectorName $conn.Name
+            -Timestamp $entry.Updated `
+            -Status (Get-SiteStatusFromEntry -Entry $entry) `
+            -Protected (Get-ProtectedFlagFromEntry -Entry $entry) `
+            -ConnectorName $conn.Name
     }
 }
 
@@ -356,6 +388,7 @@ $rows = @(
                 SiteURL      = $_.Key
                 LastSeenDate = $_.Value.LastSeen
                 Status       = $_.Value.Status
+                Protected    = $_.Value.Protected
                 Connector    = $_.Value.Connector
             }
         } |

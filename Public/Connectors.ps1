@@ -1310,6 +1310,13 @@ function Set-KeepitConnectorConfiguration {
                 }
             }
 
+            # Validate AutoIncludeSites requires SharePoint workload
+            if ($PSBoundParameters.ContainsKey('AutoIncludeSites')) {
+                if ($Workload -ne 'SharePoint') {
+                    throw "The -AutoIncludeSites parameter is only valid when -Workload is SharePoint"
+                }
+            }
+
             # Check if AddIncludedGroups/RemoveIncludedGroups is being used for Exchange/OneDrive UserSelectionRules
             $hasExchangeGroupParams = ($Workload -in @('Exchange', 'OneDrive')) -and
                                       ($PSBoundParameters.ContainsKey('AddIncludedGroups') -or $PSBoundParameters.ContainsKey('RemoveIncludedGroups'))

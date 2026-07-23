@@ -3,7 +3,7 @@
     RootModule = 'KeepitTools.psm1'
 
     # Version number of this module
-    ModuleVersion = '1.4.2'
+    ModuleVersion = '1.4.4'
 
     # Supported PSEditions
     CompatiblePSEditions = @('Core')
@@ -129,6 +129,13 @@
 
             # ReleaseNotes of this module
             ReleaseNotes = @'
+Version 1.4.4
+- EverCovered-Sites.ps1 (example): Add a Protected column exposing the SharePoint protected flag from Search-KeepitSnapshot metadata
+- EverCovered-Sites.ps1 (example): Fix the Status column reporting deleted or removed sites as Active; status now derives from each entry's IsDeleted flag
+
+Version 1.4.3
+- Get-KeepitUser: Fix 400 Bad Request by changing the /tokens Accept header from v4 to v2 (v4 is documented as incompatible with the /tokens endpoint)
+
 Version 1.4.2
 - Fix all remaining PSScriptAnalyzer warnings for a clean PSGallery listing
 - Remove unused parameters: JobStatus (Invoke-JobCancellation), UserPrincipalName (Submit-ExpressRestoreJobs), FullConfig (Get-SharePointCoverage, Get-UnifiedGroupsCoverage)

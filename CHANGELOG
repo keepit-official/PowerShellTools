@@ -1,5 +1,14 @@
 # KeepitTools Changelog
 
+## Version 1.4.4
+
+- EverCovered-Sites.ps1 (example): Add a `Protected` column exposing the SharePoint `protected` flag, read from the `Search-KeepitSnapshot` metadata (the `protected` key is present on protected sites and absent otherwise)
+- EverCovered-Sites.ps1 (example): Fix the `Status` column reporting deleted or removed sites as `Active`; status is now derived from each entry's own `IsDeleted` flag rather than from which search returned it
+
+## Version 1.4.3
+
+- Get-KeepitUser: Fix 400 Bad Request by changing the /tokens Accept header from v4 to v2 (v4 is documented as incompatible with the /tokens endpoint)
+
 ## Version 1.4.2
 
 - Fix all remaining PSScriptAnalyzer warnings for a clean PSGallery listing

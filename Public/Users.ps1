@@ -398,7 +398,8 @@ function Get-KeepitUser {
 
         $headers = @{
             'Authorization' = $authHeader
-            'Accept'        = 'application/vnd.keepit.v4+xml'
+            # v4 is incompatible with the /tokens endpoint and returns 400 Bad Request.
+            'Accept'        = 'application/vnd.keepit.v2'
         }
 
         $uri = "$baseUrl/users/$userId/tokens"
