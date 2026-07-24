@@ -448,7 +448,9 @@ function Resolve-RestoreJobPlan {
 
         $snapshotParams = @{
             Connector  = $ConnectorGuid
-            StartTime  = $snapshotTime
+            # +1s so a snapshot stamped exactly at $snapshotTime is included
+            # (the reverse-range upper bound is exclusive).
+            StartTime  = $snapshotTime.AddSeconds(1)
             EndTime    = $snapshotTime.AddYears(-1)
             Reverse    = $true
             ResultSize = 1
@@ -827,7 +829,9 @@ function Restore-KeepitBulkDeletedItems {
                         # Search backwards from item timestamp to find the snapshot at or before this time
                         $snapshotParams = @{
                             Connector   = $connectorGuid
-                            StartTime   = $snapshotTime
+                            # +1s so a snapshot stamped exactly at $snapshotTime is included
+                            # (the reverse-range upper bound is exclusive).
+                            StartTime   = $snapshotTime.AddSeconds(1)
                             EndTime     = $snapshotTime.AddYears(-1)
                             Reverse     = $true
                             ResultSize  = 1
@@ -885,7 +889,9 @@ function Restore-KeepitBulkDeletedItems {
 
                 $snapshotParams = @{
                     Connector   = $connectorGuid
-                    StartTime   = $snapshotTime
+                    # +1s so a snapshot stamped exactly at $snapshotTime is included
+                    # (the reverse-range upper bound is exclusive).
+                    StartTime   = $snapshotTime.AddSeconds(1)
                     EndTime     = $snapshotTime.AddYears(-1)
                     Reverse     = $true
                     ResultSize  = 1

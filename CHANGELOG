@@ -1,5 +1,30 @@
 # KeepitTools Changelog
 
+## Version 1.6.0
+
+- Save-KeepitFailedItems: New cmdlet to download the items that failed in a previous restore job as a ZIP, instead of restoring them back into Microsoft 365
+- Save-KeepitFailedItems: Reads the skipped-item list from the job log (or a Job Report CSV via -ReportPath), locates each failed file in the backup snapshot, and downloads the backed-up contents
+- Save-KeepitFailedItems: Matches failed items to their backup by workload (SharePoint / Teams / OneDrive) and path tail, so a name that exists in several places resolves to the workload named in the failure
+- Save-KeepitFailedItems: Lays the downloaded files out in a folder tree mirroring their original location so same-named files in different folders do not collide; non-file failures are reported as skipped
+- Save-KeepitFailedItems: Supports -IncludeCause / -ExcludeCause filtering, -OutputPath, -TimeoutSec, and -WhatIf / -Confirm; reads only from the backup and makes no changes to Microsoft 365
+
+## Version 1.5.0
+
+- Restore-KeepitFailedItems: New cmdlet to retry the items that failed in a previous restore job
+- Restore-KeepitFailedItems: Recovers the snapshot and restore settings from the original job (snaptime, restore modes, scope paths) and resubmits only the failed items
+- Restore-KeepitFailedItems: Reads the failed-item list from the job log, or from a Job Report CSV via -ReportPath
+- Restore-KeepitFailedItems: Supports -IncludeCause / -ExcludeCause filtering, -ShowJobs, and -WhatIf / -Confirm
+- Restore-KeepitFailedItems: Resolves the submitted retry job's real GUID from job history (the srestore POST does not return one)
+- Restore-KeepitFailedItems: Retry whole-scope restores that have no per-item paths (for example a SharePoint site restore, which uses RestoreSharePoint/Site, as well as Salesforce and whole-mailbox restores) by re-running the job's own restore configuration with the resolved snapshot; previously these failed with "no RestoreConfig paths"
+- Restore-KeepitFailedItems: Decline whole-site restores that were relocated to a new URL (a replay would re-provision the destination site and fail with "a site already exists"); the warning points to re-running from the admin center into a fresh target or downloading the failed items
+- Restore-KeepitBulkDeletedItems: Harden snapshot resolution so a snapshot stamped exactly at an item's timestamp is included (the reverse-range upper bound is exclusive, which could otherwise resolve the previous snapshot)
+- Get-KeepitJobHistory: Add -FailReason switch to request the job-level fail_reason statistic and surface it as a FailReason property on failed jobs; the retry example's job picker uses it to show why each failed job failed
+
+## Version 1.4.5
+
+- Set-KeepitConnectorConfiguration and New-KeepitConnector: Raise the connector configuration size guard from 64K to the real backend limit of 1GB (measured as UTF-8 bytes). The 64K cap wrongly rejected large full-config replacements, such as a SharePoint connector with thousands of manually included sites
+- BulkSiteConfig (example): Add `Add-KeepitSharePointSites.ps1` to bulk-add SharePoint site collections to a connector from a plain-text or CSV file, in a single API call per connector. Supports a single target connector or per-row routing via a CSV column (`-TargetConnector`), with input validation, per-connector de-duplication, and `-WhatIf`
+
 ## Version 1.4.4
 
 - EverCovered-Sites.ps1 (example): Add a `Protected` column exposing the SharePoint `protected` flag, read from the `Search-KeepitSnapshot` metadata (the `protected` key is present on protected sites and absent otherwise)
@@ -91,181 +116,6 @@
 - Convert-KeepitUPNToGuid: Escape GUIDs with double dashes for Keepit path format
 - ConvertTo-MaskedPath: Make dash escaping idempotent so pre-escaped GUIDs are not re-doubled
 
-## Version 0.9.9
+---
 
-- Stop-KeepitJob: New cmdlet to cancel running, scheduled, and queued jobs
-- Stop-KeepitJob: Support -All switch to cancel every active/scheduled job on a connector
-- Stop-KeepitJob: Support pipeline input from Get-KeepitJobs
-- Stop-KeepitJob: Support -WhatIf and -Confirm
-- Start-KeepitBackup: Add -ScheduledTime parameter for scheduling future backups
-- Get-KeepitConnectorConfiguration: Add -Coverage parameter to return parsed backup scope per workload
-  - SharePoint: returns sites with auto-include, sub-site, and exclusion details
-  - Exchange: returns enabled categories and user selection rules
-  - OneDrive: returns options and user selection rules
-  - Teams: returns auto-include groups, enabled categories, and include/exclude group lists
-
-## Version 0.9.8
-
-- Get-KeepitShare: New cmdlet to list all shared secure links for the authenticated user
-- New-KeepitShare: New cmdlet to create shared secure links with optional password and expiry
-- Set-KeepitShare: New cmdlet to update share properties (lifetime, password, snapshot)
-- Remove-KeepitShare: New cmdlet to delete shared secure links
-
-## Version 0.9.7
-
-- Get-KeepitJobs: Add -Active switch to show only currently running jobs
-- Get-KeepitJobs: Add -Completed switch to show only finished jobs
-- Get-KeepitJobs: Add -Scheduled switch to show only pending scheduled jobs
-
-## Version 0.9.6
-
-- Get-KeepitAuditLog: New cmdlet to retrieve audit log entries from the Keepit platform
-- Get-KeepitAuditLog: Support date range filtering with -StartTime and -EndTime
-- Get-KeepitAuditLog: Support -ResultSize parameter (default 100, max 10000)
-- Get-KeepitAuditLog: Support -Area filter for event categories
-
-## Version 0.9.5
-
-- Get-KeepitConnector: Rename -All to -IncludeDeleted for clarity
-- Get-KeepitConnector: Add Deleted property to output (true if connector has deletion-deadline)
-
-## Version 0.9.4
-
-- Restore-KeepitBulkDeletedItems: Add job batching for large item sets exceeding 64KB XML limit
-- Restore-KeepitBulkDeletedItems: Jobs output now includes BatchNumber and TotalBatches when batching occurs
-- Restore-KeepitBulkDeletedItems: WhatIf output shows accurate job counts including batched jobs
-
-## Version 0.9.2
-
-- New-KeepitConnector: Create new Keepit connectors with configurable type, name, and retention
-- New-KeepitConnector: Support Configuration parameter for inline JSON or TemplateFile for file-based config
-- New-KeepitConnector: Support DSL-based connectors (Jira, Confluence, etc.) with automatic agent-type handling
-- New-KeepitConnector: Implement OrgLink parameter for linking M365 connectors to tenants
-- Get-KeepitConnectorConfiguration: Add -Raw switch to return raw XML from device endpoint
-
-## Version 0.8.2
-
-- Set-KeepitConnectorConfiguration: Add Exchange and OneDrive workload support with aliases (ExO, ODB)
-- Set-KeepitConnectorConfiguration: Add -EnabledCategories parameter for Exchange workload
-- Set-KeepitConnectorConfiguration: Add UserSelectionRules parameters for Exchange/OneDrive:
-  - -AddIncludedUsers, -RemoveIncludedUsers (UserSelectionRules.IncludeUsers)
-  - -AddExcludedUsers, -RemoveExcludedUsers (UserSelectionRules.ExcludeUsers)
-  - -AddIncludedCategories, -RemoveIncludedCategories (AllUsers, AllGroups, UsersNotInGroups)
-- Set-KeepitConnectorConfiguration: -AddIncludedGroups/-RemoveIncludedGroups now work for Exchange/OneDrive (modifies UserSelectionRules.IncludeGroups)
-- Set-KeepitConnectorConfiguration: Add case-sensitivity validation for EnabledCategories
-- Set-KeepitConnectorConfiguration: Add -WhatIf support for Exchange and OneDrive workloads
-- Update M365-connector-config-schema.md with expanded UserSelectionRules documentation
-
-## Version 0.8.1
-
-- Set-KeepitConnectorConfiguration: Fix -AutoIncludeSites to always set value explicitly
-- Set-KeepitConnectorConfiguration: Fix -AutoIncludeSites:$false to set AutoIncludeAllSiteCollections to false instead of removing the key
-
-## Version 0.8.0
-
-- Set-KeepitConnectorConfiguration: Show raw configuration with -WhatIf for SharePoint and Teams workloads
-- Set-KeepitConnectorConfiguration: Fix missing implementation for -AddIncludedSites, -RemoveIncludedSites, -AddExcludedSites, -RemoveExcludedSites
-- Set-KeepitConnectorConfiguration: Add -AddExcludedGroups and -RemoveExcludedGroups parameters for Teams workload
-- Set-KeepitConnectorConfiguration: Add warnings for duplicate add/missing remove operations
-- Set-KeepitConnectorConfiguration: Skip write if no configuration changes were made
-- Set-KeepitConnectorConfiguration: Include RawConfiguration in success output
-- Set-KeepitConnectorConfiguration: Fix URL whitespace handling in site comparisons
-- Restore-KeepitBulkDeletedItems: Show restore job XML with -WhatIf and improved -ShowJobs formatting
-
-## Version 0.7.8
-
-- Rename StartDate/EndDate to StartTime/EndTime in Get-KeepitSnapshot, Get-KeepitJobs, Restore-KeepitBulkDeletedItems
-- Get-KeepitConnector: BackupRetention now shows human-readable values (e.g., "3 months", "Unlimited") instead of ISO 8601
-- Fix module version display: remove Export-ModuleMember, use manifest FunctionsToExport only
-
-## Version 0.7.7
-
-- Add Set-KeepitConnectorConfiguration cmdlet for updating connector configuration via JSON
-- Get-KeepitConnectorConfiguration: Add -Workload parameter for filtering by workload type
-- Get-KeepitConnectorConfiguration: Rename Configuration to RawConfiguration for clarity
-- Get-KeepitConnectorConfiguration: Add parsed Configuration property when -Workload specified
-
-## Version 0.7.6
-
-- Search-KeepitSnapshot: Simplify response parsing, remove 76 lines of dead code
-- Search-KeepitSnapshot: Reduce parsing branches from 14 to 4 (Array, XmlEntry, XmlFeed, Fallback)
-- Search-KeepitSnapshot: Remove unused JSON and regex fallback parsing paths
-
-## Version 0.7.5
-
-- Restore-KeepitBulkDeletedItems: Add OneDrive for Business file restore support
-- New-RestoreJobXml: Add OneDrive type with DeltaAppend FolderRestoreMode
-- Search-KeepitSnapshot: Add user-not-found validation with clear error message
-- Search-KeepitSnapshot: Add EndTime/StartTime validation (EndTime cannot be before StartTime)
-- Search-KeepitSnapshot: Add ItemType detection for OneDrive (folder/file from contentType)
-- Search-KeepitSnapshot: Extract Size from meta element for OneDrive items
-- Search-KeepitSnapshot: Remove Published property from output
-
-## Version 0.7.1
-
-- Fix culture-sensitive date formatting that caused API failures in non-US locales
-- All DateTime.ToString() calls now use InvariantCulture for consistent ISO 8601 output
-- Add unit tests for ConvertTo-KeepitTimestamp culture-invariant behavior
-
-## Version 0.7.0
-
-- Restore-KeepitBulkDeletedItems: Add Entra ID user restore support with correct XML configuration
-- Restore-KeepitBulkDeletedItems: Fix CSV pipeline to correctly restore each user (not just first)
-- Restore-KeepitBulkDeletedItems: Handle recreated users by filtering on UPN instead of GUID
-- Start-KeepitBackup: Replace Scheduled with CreatedAt in output
-- Start-KeepitBackup: Remove Priority and JobGuid from output
-- Start-KeepitBackup: Gracefully handle Entra connectors returning empty response
-- Start-KeepitBackup: Gracefully handle RUNNING_JOB error when backup already in progress
-- Search-KeepitSnapshot: Fix DeletedOnly for Entra connectors (client-side filtering)
-- Search-KeepitSnapshot: Add ItemType derivation from contentType
-- Search-KeepitSnapshot: Fix IsDeleted detection for empty XML tags
-- Search-KeepitSnapshot: Add Entra ID pathroot validation
-- Search-KeepitSnapshot: Change -Recursive to switch parameter (default false)
-- Get-KeepitSnapshot: Add ConnectorName to output
-- Get-KeepitJobs: Add ConnectorName to output
-- Standardize path parameter naming to RootPath across all cmdlets
-- Standardize connector parameter naming to Connector across all cmdlets
-
-## Version 0.5.6
-
-- Search-KeepitSnapshot: Fixed DateTime parsing to treat ISO8601 timestamps as UTC
-- Search-KeepitSnapshot: Renamed SnaptimeFrom/SnaptimeTo to StartTime/EndTime
-- Search-KeepitSnapshot: Same-date StartTime/EndTime now searches entire day
-
-## Version 0.5.5
-
-- Get-KeepitSnapshot: Fixed date range query to make EndDate inclusive
-
-## Version 0.5.0
-
-- Submit-KeepitJob: Low-level cmdlet to submit backup/restore jobs with raw XML configuration
-- Restore-KeepitBulkDeletedItems: High-level cmdlet for bulk restore of deleted email items
-- Search-KeepitSnapshot: Added -DeletedOnly parameter, changed -Recursive default to $true
-- Get-KeepitSnapshot: Added ResultSize parameter with pagination support
-
-## Version 0.0.4
-
-- Get-KeepitConnectorConfiguration: Retrieve connector configuration and custom attributes
-- Enable-KeepitConnector: Enable a disabled connector
-- Disable-KeepitConnector: Disable a connector
-- Get-KeepitConnector: Added display name support for -Type parameter
-
-## Version 0.0.3 (Initial Release)
-
-- Connect-KeepitService: Establish authenticated connection to Keepit platform
-- Disconnect-KeepitService: Clean up session and cached credentials
-- Get-KeepitConnector: Retrieve all accessible Office 365 connectors
-- Get-KeepitSnapshot: Retrieve snapshot information (latest, range, or count)
-- Get-KeepitJobs: Retrieve backup and restore jobs for connectors
-- Start-KeepitBackup: Start immediate or scheduled backup jobs on connectors
-
-### Features
-
-- Cross-platform support (Windows, macOS, Linux)
-- Secure credential handling using PSCredential
-- Support for all Keepit data center environments
-- Flexible authentication (cached or per-call credentials)
-- Full pipeline support for efficient workflows
-- Immediate and scheduled backup job creation
-- Job monitoring and filtering by type
-- Bulk restore with job coalescing by snapshot
+_Releases prior to 1.0.0 are recorded in the git history._

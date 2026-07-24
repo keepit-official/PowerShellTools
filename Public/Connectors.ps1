@@ -928,7 +928,7 @@ function Get-KeepitConnectorConfiguration {
     The connector name or GUID. Can be piped from Get-KeepitConnector.
     Aliases: ConnectorGuid, Name
 .PARAMETER RawConfiguration
-    The JSON configuration string to set. Maximum 64K length. Optional.
+    The JSON configuration string to set. Maximum 1GB. Optional.
     This should be a valid JSON structure matching the connector type's expected format.
     If not provided, the current configuration will be fetched and modification parameters
     (such as -AutoIncludeSites, -AddIncludedSites, etc.) will be applied to it.
@@ -1083,8 +1083,11 @@ function Set-KeepitConnectorConfiguration {
 
         [ValidateNotNullOrEmpty()]
         [ValidateScript({
-            if ($_.Length -gt 65536) {
-                throw "RawConfiguration exceeds maximum length of 64K"
+            # The connector configuration attribute (ng_backup_config) accepts up
+            # to 1GB on the backend; guard against payloads beyond that. Byte count,
+            # not character count, is what the backend limit is measured in.
+            if ([System.Text.Encoding]::UTF8.GetByteCount($_) -gt 1073741824) {
+                throw "RawConfiguration exceeds the maximum connector configuration size of 1GB"
             }
             # Basic JSON validation
             try {
@@ -1753,7 +1756,7 @@ function Set-KeepitConnectorConfiguration {
 .PARAMETER Name
     The connector name. Must be 1-255 characters.
 .PARAMETER Configuration
-    A JSON string containing the connector configuration. Maximum 64K length.
+    A JSON string containing the connector configuration. Maximum 1GB.
     Cannot be used together with -TemplateFile.
 .PARAMETER TemplateFile
     Path to a file containing the JSON configuration. The file must exist and contain valid JSON.
@@ -1805,8 +1808,10 @@ function New-KeepitConnector {
 
         [Parameter(ParameterSetName = 'ConfigString')]
         [ValidateScript({
-            if ($_.Length -gt 65536) {
-                throw "Configuration exceeds maximum length of 64K characters"
+            # The connector configuration attribute accepts up to 1GB on the
+            # backend (byte count, not character count).
+            if ([System.Text.Encoding]::UTF8.GetByteCount($_) -gt 1073741824) {
+                throw "Configuration exceeds the maximum connector configuration size of 1GB"
             }
             try {
                 $null = $_ | ConvertFrom-Json
@@ -1824,8 +1829,10 @@ function New-KeepitConnector {
                 throw "Template file not found: $_"
             }
             $content = Get-Content -Path $_ -Raw
-            if ($content.Length -gt 65536) {
-                throw "Template file content exceeds maximum length of 64K characters"
+            # The connector configuration attribute accepts up to 1GB on the
+            # backend (byte count, not character count).
+            if ([System.Text.Encoding]::UTF8.GetByteCount($content) -gt 1073741824) {
+                throw "Template file content exceeds the maximum connector configuration size of 1GB"
             }
             try {
                 $null = $content | ConvertFrom-Json

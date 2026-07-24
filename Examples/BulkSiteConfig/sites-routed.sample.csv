@@ -1,0 +1,6 @@
+SiteUrl,TargetConnector
+https://contoso.sharepoint.com/sites/Marketing,Contoso Primary
+https://contoso.sharepoint.com/sites/Finance,Contoso Primary
+https://contoso.sharepoint.com/sites/HR,Contoso Secondary
+https://contoso.sharepoint.com/sites/Engineering,Contoso Secondary
+https://contoso.sharepoint.com/sites/Legal,Contoso Archive

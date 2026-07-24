@@ -434,6 +434,9 @@ function Get-KeepitJobs {
     If not specified, the API returns its default limit.
 .PARAMETER FailedOnly
     Returns only failed jobs. Cannot be combined with other status filters.
+.PARAMETER FailReason
+    Requests the job-level fail_reason statistic and surfaces it as a FailReason
+    property on each returned job (populated for failed jobs; $null otherwise).
 .PARAMETER Raw
     Returns the raw XML response from the API instead of parsed PowerShell objects.
     Useful for debugging or when you need the complete API response.
@@ -501,6 +504,8 @@ function Get-KeepitJobHistory {
 
         [switch]$FailedOnly,
 
+        [switch]$FailReason,
+
         [switch]$Raw
     )
 
@@ -563,6 +568,11 @@ function Get-KeepitJobHistory {
             if ($FailedOnly) {
                 $filterXml += "<failed-only>true</failed-only>"
             }
+            if ($FailReason) {
+                # Request the job-level fail_reason stat (returned per job as
+                # <stats><stat><name>fail_reason</name><value>...</value></stat></stats>).
+                $filterXml += "<stats><name>fail_reason</name></stats>"
+            }
             $filterXml += "</filter>"
 
             $uri = "$baseUrl/users/$userId/devices/$connectorGuid/jobs"
@@ -610,6 +620,12 @@ function Get-KeepitJobHistory {
                     Failed        = if ($job.failed) { $job.failed } else { $null }
                     Status        = $status
                     Progress      = if ($job.progress) { [double]$job.progress } else { $null }
+                    FailReason    = $(
+                        if ($job.stats -and $job.stats.stat) {
+                            $fr = @($job.stats.stat) | Where-Object { $_.name -eq 'fail_reason' } | Select-Object -First 1
+                            if ($fr) { [string]$fr.value } else { $null }
+                        } else { $null }
+                    )
                 }
             }
         }

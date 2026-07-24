@@ -1,0 +1,10 @@
+# Sample site list for Add-KeepitSharePointSites.ps1
+# One SharePoint site collection URL per line.
+# Blank lines and lines beginning with '#' are ignored.
+# Trailing slashes and duplicate entries are handled automatically.
+
+https://contoso.sharepoint.com/sites/Marketing
+https://contoso.sharepoint.com/sites/Finance
+https://contoso.sharepoint.com/sites/HR
+https://contoso.sharepoint.com/sites/Engineering
+https://contoso.sharepoint.com/sites/Legal

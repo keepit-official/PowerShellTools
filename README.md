@@ -141,6 +141,8 @@ Remove-Module KeepitTools
 | `Disable-KeepitConnector`          | Disables a connector                                               |
 | `Submit-KeepitJob`                 | Submits backup/restore jobs with raw XML configuration             |
 | `Restore-KeepitBulkDeletedItems`   | Bulk restores deleted email items from Keepit backups              |
+| `Restore-KeepitFailedItems`        | Retries the items that failed in a previous restore job            |
+| `Save-KeepitFailedItems`           | Downloads the items that failed in a previous restore job as a ZIP |
 | `Start-KeepitExpressRestore`       | Express restore of recent user data by time window (Experimental)  |
 | `Get-KeepitAuditLog`               | Retrieves audit log entries with optional date and area filtering  |
 | `Get-KeepitShare`                  | Lists all shared secure links for the authenticated user           |
@@ -469,6 +471,75 @@ Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector 
 # Preview what would be restored without actually restoring
 Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "your-connector-guid" -RootPath "Deleted Items" -StartTime (Get-Date).AddDays(-30) -EndTime (Get-Date) -WhatIf
 ```
+
+### Retry Failed Restore Items
+
+When a restore job finishes with some items failing (the Keepit platform records
+this as `failed_to_restore_some_items`), `Restore-KeepitFailedItems` retries just
+those items. It reads the original job to recover the snapshot and restore
+settings, reads the failed-item list from the job log, and resubmits a new
+restore job containing only the failed items, into their original location.
+
+A common cause of partial failure is environmental and transient (for example a
+Microsoft `CODE:507` "Insufficient Storage" when a destination is over quota).
+Once the underlying condition is fixed, retrying completes the restore.
+
+```powershell
+# Preview what would be retried for a failed job (nothing is submitted)
+Restore-KeepitFailedItems -Connector "Production M365" -JobGuid "41uuom-csg9bg-zu01hz-r8apss" -WhatIf
+
+# Retry the failed items
+Restore-KeepitFailedItems -Connector "Production M365" -JobGuid "41uuom-csg9bg-zu01hz-r8apss"
+
+# Retry only items that failed with a specific cause
+Restore-KeepitFailedItems -Connector "Production M365" -JobGuid "41uuom-..." -IncludeCause 'CODE:507'
+
+# Use a Job Report CSV exported from the admin center instead of querying the log
+Restore-KeepitFailedItems -ReportPath ./Job_Report.csv -WhatIf
+```
+
+The cmdlet supports `-WhatIf`/`-Confirm`, and `-ShowJobs` to print the restore
+job XML. The connector and job are taken from the CSV when `-ReportPath` is used.
+
+Most restores identify individual items by path, and the cmdlet resubmits just
+the failed ones. Some restores instead cover a whole scope with no per-item paths
+— for example a **SharePoint site restore** (which uses `RestoreSharePoint`),
+or a Salesforce or whole-mailbox restore. For these the cmdlet retries by
+re-running the original job's restore configuration against the same snapshot
+(a "replay"), which re-runs the whole restore and so retries the failed items;
+`-IncludeCause`/`-ExcludeCause` do not apply in that case.
+
+A whole-site restore that was **relocated to a new URL** is the exception: it
+cannot be replayed, because the destination site already exists and the restore
+engine cannot re-create it. The cmdlet declines those with a warning naming the
+relocation target; re-run them from the admin center into a fresh target, or
+download the failed items with `Save-KeepitFailedItems` (below).
+
+### Download Failed Restore Items
+
+When failed items cannot be retried in place - for example a whole-site SharePoint
+restore that was relocated to a new URL - `Save-KeepitFailedItems` downloads the
+failed items instead. It reads the job's skipped-item list, locates each failed
+file in the backup snapshot, and downloads the backed-up contents as a single ZIP,
+with the files laid out in a folder tree that mirrors their original location.
+
+It reads only from the backup snapshot, so it needs no target site and makes no
+changes to Microsoft 365. SharePoint, Teams and OneDrive document files download
+cleanly; non-file failures (list items, pages, folders) are reported as skipped.
+
+```powershell
+# Preview what would be downloaded (nothing is submitted)
+Save-KeepitFailedItems -Connector "Production M365" -JobGuid "41uuom-csg9bg-zu01hz-r8apss" -WhatIf
+
+# Download the failed items to a folder (a timestamped .zip is created there)
+Save-KeepitFailedItems -Connector "Production M365" -JobGuid "41uuom-..." -OutputPath ~/Downloads
+
+# Only the items that failed with a specific cause
+Save-KeepitFailedItems -Connector "Production M365" -JobGuid "41uuom-..." -IncludeCause '*507*'
+```
+
+The failed-item log is retained for about 30 days; use `-ReportPath` with a saved
+Job Report CSV to download items from an older job.
 
 ### Express Restore (Experimental)
 
