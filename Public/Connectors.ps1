@@ -181,7 +181,8 @@ function Remove-FromSiteCollectionList {
 .PARAMETER Type
     Optional connector type(s) to filter. Can specify one or more types using either:
     - Internal keys: o365-admin, dynamics365, sforce, gsuite, powerbi, zendesk, azure-do, azure-ad,
-                     dsl, jira, confluence, bamboohr, docusign, jsm, okta, miro, gitlab, monday
+                     dsl, jira, confluence, bamboohr, docusign, jsm, okta, miro, gitlab, github, monday,
+                     autodesk-forma
     - Display names: 'Microsoft 365', 'Entra ID', 'Jira Service Management', etc.
     If not specified, returns all connector types.
 .PARAMETER IncludeDeleted

@@ -558,6 +558,11 @@ function Get-KeepitSnapshot {
     Cannot be used with -ResultSize.
 .PARAMETER StartIndex
     Index of first result for pagination. Default is 0.
+.PARAMETER Notify
+    When specified, sends a non-blocking desktop notification after result enumeration completes.
+    The notification includes the item count and connector name.
+    Uses the platform-appropriate mechanism: Windows NotifyIcon balloon, macOS osascript, or Linux notify-send.
+    Falls back to Write-Host when no notification subsystem is available.
 .EXAMPLE
     Search-KeepitSnapshot -Connector "Production M365" -RootPath "/Users/user@example.com/Outlook/Inbox" -StartTime "2026-01-01" -EndTime "2026-01-31"
 
@@ -687,7 +692,10 @@ function Search-KeepitSnapshot {
 
         [Parameter(Mandatory = $false)]
         [ValidateRange(0, [int]::MaxValue)]
-        [int]$StartIndex = 0
+        [int]$StartIndex = 0,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Notify
     )
 
     begin {
@@ -1504,6 +1512,11 @@ function Search-KeepitSnapshot {
             }
 
             Write-Verbose "Total results returned: $totalReturned"
+
+            if ($Notify) {
+                $notifyMsg = if ($totalReturned -eq 1) { "Found 1 item on $($resolved.Name)" } else { "Found $totalReturned items on $($resolved.Name)" }
+                Show-KeepitNotification -Title 'Keepit Search Complete' -Message $notifyMsg
+            }
 
             if ($totalReturned -eq 0) {
                 Write-Verbose "Search-KeepitSnapshot: No matching results found"

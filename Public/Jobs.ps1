@@ -904,6 +904,11 @@ function New-AlreadyQueuedResult {
     Optional DateTime for scheduling the backup at a future time.
     Must be in the future. Times are converted to UTC for the API.
     If not specified, the backup starts immediately.
+.PARAMETER Notify
+    When specified, sends a non-blocking desktop notification when the backup job is successfully created.
+    The notification distinguishes between an immediate start and a scheduled start.
+    Uses the platform-appropriate mechanism: Windows NotifyIcon balloon, macOS osascript, or Linux notify-send.
+    Falls back to Write-Host when no notification subsystem is available.
 .EXAMPLE
     Start-KeepitBackup -Connector "Production M365"
 
@@ -955,7 +960,10 @@ function Start-KeepitBackup {
         [Alias('ConnectorGuid', 'Name')]
         [string]$Connector,
 
-        [DateTime]$ScheduledTime
+        [DateTime]$ScheduledTime,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Notify
     )
 
     begin {
@@ -1241,6 +1249,11 @@ function Start-KeepitBackup {
                 if ($scheduledTimeValue) { Write-Verbose "ScheduledTime: $scheduledTimeValue" }
                 Write-Verbose "CreatedAt: $($jobObject.CreatedAt)"
                 Write-Verbose "=== End Start-KeepitBackup ==="
+
+                if ($Notify) {
+                    $notifyMsg = if ($scheduledTimeValue) { "Backup scheduled for $($resolved.Name) at $scheduledTimeValue" } else { "Backup started on $($resolved.Name)" }
+                    Show-KeepitNotification -Title 'Keepit Backup Started' -Message $notifyMsg
+                }
 
                 $jobObject
             }

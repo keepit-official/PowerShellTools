@@ -543,6 +543,10 @@ function Resolve-RestoreJobPlan {
 .PARAMETER ShowJobs
     When specified, prints the XML job configuration blob for each restore job.
     Works with both -WhatIf (to see what would be submitted) and normal execution (to see what was submitted).
+.PARAMETER Notify
+    When specified, sends a non-blocking desktop notification when all restore jobs have been submitted.
+    Uses the platform-appropriate mechanism: Windows NotifyIcon balloon, macOS osascript, or Linux notify-send.
+    Falls back to Write-Host when no notification subsystem is available.
 .EXAMPLE
     Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "Production M365" -RootPath "Inbox" -StartTime "2026-01-01" -EndTime "2026-01-15"
 
@@ -618,7 +622,10 @@ function Restore-KeepitBulkDeletedItems {
         [switch]$Recursive,
 
         [Parameter(Mandatory = $false)]
-        [switch]$ShowJobs
+        [switch]$ShowJobs,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Notify
     )
 
     begin {
@@ -972,6 +979,10 @@ function Restore-KeepitBulkDeletedItems {
 
             Write-Verbose "=== Restore-KeepitBulkDeletedItems: Complete ==="
             Write-Verbose "Submitted $($jobResults.Count) restore jobs"
+
+            if ($Notify) {
+                Show-KeepitNotification -Title 'Keepit Restore Complete' -Message "Submitted $($jobResults.Count) restore job(s) for $UserPrincipalName"
+            }
 
             # Return job results
             $jobResults.ToArray()
@@ -1366,6 +1377,10 @@ function Convert-KeepitGuidToUPN {
 .PARAMETER ShowJobs
     When specified, prints the XML job configuration blob for each restore job.
     Works with both -WhatIf and normal execution.
+.PARAMETER Notify
+    When specified, sends a non-blocking desktop notification when all restore jobs have been submitted.
+    Uses the platform-appropriate mechanism: Windows NotifyIcon balloon, macOS osascript, or Linux notify-send.
+    Falls back to Write-Host when no notification subsystem is available.
 .EXAMPLE
     Start-KeepitExpressRestore -UserPrincipalName "user@example.com" -Connector "Production M365" -Workload Exchange -Timespan "P7D"
 
@@ -1434,7 +1449,10 @@ function Start-KeepitExpressRestore {
         [switch]$InboxOnly,
 
         [Parameter(Mandatory = $false)]
-        [switch]$ShowJobs
+        [switch]$ShowJobs,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Notify
     )
 
     begin {
@@ -1682,6 +1700,10 @@ function Start-KeepitExpressRestore {
 
             Write-Verbose "=== Start-KeepitExpressRestore: Complete ==="
             Write-Verbose "Submitted $($jobResults.Count) restore jobs for $UserPrincipalName"
+
+            if ($Notify) {
+                Show-KeepitNotification -Title 'Keepit Express Restore Complete' -Message "Submitted $($jobResults.Count) restore job(s) for $UserPrincipalName"
+            }
 
             $jobResults.ToArray()
         }

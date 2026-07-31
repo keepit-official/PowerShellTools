@@ -1,5 +1,15 @@
 # KeepitTools Changelog
 
+## Version 1.6.2
+
+- Add GitHub as a supported connector type. `Get-KeepitConnector -Type github` (or `-Type 'GitHub'`) filters GitHub connectors, and `New-KeepitConnector -ConnectorType github` creates one; GitHub is a DSL-based connector, so the API type is `dsl` with a `github` agent type
+- Add Autodesk Forma as a supported connector type (`autodesk-forma`, display name `Autodesk Forma`), also DSL-based
+
+## Version 1.6.1
+
+- Add `-Notify` switch to `Restore-KeepitBulkDeletedItems`, `Start-KeepitExpressRestore`, `Search-KeepitSnapshot`, and `Start-KeepitBackup` to send a non-blocking desktop notification when each operation completes
+- Add `Show-KeepitNotification` private helper that selects the platform-appropriate notification mechanism: Windows NotifyIcon balloon tip, macOS `osascript display notification`, Linux `notify-send` with a `Write-Host` fallback; all notification failures are swallowed silently
+
 ## Version 1.6.0
 
 - Save-KeepitFailedItems: New cmdlet to download the items that failed in a previous restore job as a ZIP, instead of restoring them back into Microsoft 365

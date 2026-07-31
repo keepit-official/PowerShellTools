@@ -3,7 +3,7 @@
     RootModule = 'KeepitTools.psm1'
 
     # Version number of this module
-    ModuleVersion = '1.6.0'
+    ModuleVersion = '1.6.2'
 
     # Supported PSEditions
     CompatiblePSEditions = @('Core')
@@ -131,6 +131,14 @@
 
             # ReleaseNotes of this module
             ReleaseNotes = @'
+Version 1.6.2
+- Add GitHub as a supported connector type for Get-KeepitConnector and New-KeepitConnector; GitHub is DSL-based, so the API type is 'dsl' with a 'github' agent type
+- Add Autodesk Forma as a supported connector type ('autodesk-forma'), also DSL-based
+
+Version 1.6.1
+- Add -Notify switch to Restore-KeepitBulkDeletedItems, Start-KeepitExpressRestore, Search-KeepitSnapshot, and Start-KeepitBackup to send a non-blocking desktop notification when each operation completes
+- Add Show-KeepitNotification private helper that selects the platform-appropriate notification mechanism (Windows balloon tip, macOS osascript, Linux notify-send, Write-Host fallback)
+
 Version 1.6.0
 - Save-KeepitFailedItems: New cmdlet to download the items that failed in a previous restore job as a ZIP, instead of restoring them back into Microsoft 365
 - Save-KeepitFailedItems: Reads the skipped-item list from the job log (or a Job Report CSV via -ReportPath), locates each failed file in the backup snapshot, and downloads the backed-up contents

@@ -752,4 +752,72 @@ function ConvertFrom-ISO8601Duration {
     return $parts -join ', '
 }
 
+<#
+.SYNOPSIS
+    Sends a non-blocking desktop notification
+.DESCRIPTION
+    Sends a system notification using the platform-appropriate mechanism:
+    - Windows: NotifyIcon balloon tip via System.Windows.Forms
+    - macOS: osascript display notification
+    - Linux: notify-send if available, else Write-Host fallback
+    All errors are swallowed silently so callers are never interrupted.
+.PARAMETER Title
+    The notification title
+.PARAMETER Message
+    The notification body text
+.PARAMETER Icon
+    The icon style: Info (default), Warning, or Error
+#>
+function Show-KeepitNotification {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Intentional: Linux fallback uses Write-Host when notify-send is unavailable')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Title,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Info', 'Warning', 'Error')]
+        [string]$Icon = 'Info'
+    )
+
+    try {
+        if ($IsWindows) {
+            Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+            $balloonIcon = switch ($Icon) {
+                'Warning' { [System.Windows.Forms.ToolTipIcon]::Warning }
+                'Error'   { [System.Windows.Forms.ToolTipIcon]::Error }
+                default   { [System.Windows.Forms.ToolTipIcon]::Info }
+            }
+            $balloon = New-Object System.Windows.Forms.NotifyIcon
+            $balloon.Icon            = [System.Drawing.SystemIcons]::Application
+            $balloon.BalloonTipIcon  = $balloonIcon
+            $balloon.BalloonTipTitle = $Title
+            $balloon.BalloonTipText  = $Message
+            $balloon.Visible         = $true
+            $balloon.ShowBalloonTip(5000)
+            Start-Sleep -Milliseconds 200
+            $balloon.Dispose()
+        }
+        elseif ($IsMacOS) {
+            $esc = { param($s) $s -replace '\\', '\\\\' -replace '"', '\"' }
+            $null = & osascript -e "display notification `"$(& $esc $Message)`" with title `"$(& $esc $Title)`"" 2>&1
+        }
+        else {
+            if (Get-Command notify-send -ErrorAction SilentlyContinue) {
+                $null = & notify-send --urgency=normal $Title $Message 2>&1
+            }
+            else {
+                Write-Host "`n[$Title] $Message" -ForegroundColor Cyan
+            }
+        }
+        Write-Verbose "Notification sent: [$Title] $Message"
+    }
+    catch {
+        Write-Verbose "Show-KeepitNotification: $($_.Exception.Message)"
+    }
+}
+
 #endregion

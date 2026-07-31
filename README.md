@@ -236,6 +236,9 @@ Start-KeepitBackup -Connector "your-connector-guid" -ScheduledTime (Get-Date).Ad
 
 # Schedule a backup for a specific date and time
 Start-KeepitBackup -Connector "Production M365" -ScheduledTime "2026-06-15T14:00:00"
+
+# Get a desktop notification when the job is created
+Start-KeepitBackup -Connector "Production M365" -Notify
 ```
 
 **Note:** If a backup job is already queued for a connector, `Start-KeepitBackup` will display a warning and return a status object with `Status = 'AlreadyQueued'` instead of creating a duplicate job.
@@ -450,6 +453,9 @@ Search-KeepitSnapshot -Connector "your-connector-guid" -RootPath "/Users/user@ex
 
 # Search within a date range
 Search-KeepitSnapshot -Connector "your-connector-guid" -RootPath "/Users/user@example.com/Outlook" -StartTime "2024-01-01" -EndTime "2024-12-31"
+
+# Get a desktop notification when the search finishes
+Search-KeepitSnapshot -Connector "your-connector-guid" -RootPath "/Users/user@example.com/Outlook" -DeletedOnly -Notify
 ```
 
 ### Bulk Restore Deleted Items
@@ -470,6 +476,9 @@ Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector 
 
 # Preview what would be restored without actually restoring
 Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "your-connector-guid" -RootPath "Deleted Items" -StartTime (Get-Date).AddDays(-30) -EndTime (Get-Date) -WhatIf
+
+# Get a desktop notification when all restore jobs have been submitted
+Restore-KeepitBulkDeletedItems -UserPrincipalName "user@example.com" -Connector "your-connector-guid" -RootPath "Inbox" -StartTime "2024-01-01" -EndTime "2024-12-31" -Notify
 ```
 
 ### Retry Failed Restore Items
@@ -565,6 +574,26 @@ The `-PrioritizeCalendar` switch will create a separate, higher-priority, job to
 executives.
 
 For now, this cmdlet doesn't restore items in subfolders, and it doesn't yet support restores in OneDrive. Both are planned.
+
+### Desktop Notifications
+
+Add `-Notify` to any of the long-running cmdlets to receive a non-blocking desktop notification when the operation completes. This is useful when running restores or searches unattended — start the operation and switch to other work; the notification appears when it is done.
+
+```powershell
+# Notify when a bulk restore finishes
+Restore-KeepitBulkDeletedItems ... -Notify
+
+# Notify when an express restore finishes
+Start-KeepitExpressRestore ... -Notify
+
+# Notify when a snapshot search finishes (includes item count)
+Search-KeepitSnapshot ... -Notify
+
+# Notify when a backup job is created
+Start-KeepitBackup -Connector "Production M365" -Notify
+```
+
+Notifications use the platform-appropriate mechanism: Windows system-tray balloon tip, macOS Notification Center (`osascript`), or Linux `notify-send` with a `Write-Host` fallback. Notification failures are silently swallowed and do not affect the cmdlet's output.
 
 ### View Audit Logs
 
