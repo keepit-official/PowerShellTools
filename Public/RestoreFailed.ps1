@@ -526,13 +526,53 @@ function Restore-KeepitFailedItems {
             if ($failed.Count -eq 0) { Write-Warning "No failed items to retry for job $JobGuid (after filtering)."; return }
 
             # --- Reconcile each failed display path onto the RestoreConfig namespace ---
+            # Two strategies, in order:
+            #   1. Look the item up in the job's snapshot (Resolve-KeepitBackupItemId,
+            #      defined in SaveFailed.ps1) and use the authoritative internal path
+            #      the backup index reports. This does not consult the job's scope
+            #      paths at all, so it works whatever shape they take. Grafting (2)
+            #      can only align on a folder name spelled the same in both the
+            #      display and internal namespaces, and is known to fail when a scope
+            #      path ends in a file name, when it stops at the site or "DocLibs"
+            #      level (those segments never appear in a display path), or when any
+            #      folder in the aligning run contains a hyphen (doubled internally).
+            #   2. Fall back to grafting the display path onto a scope path
+            #      (Resolve-KeepitRetryPath) when the lookup finds nothing.
             # The log can list the same item many times (retries, plus SharePoint
             # "Fields" sub-failures), so deduplicate by the resolved internal path.
             $items = [System.Collections.ArrayList]::new()
             $unmapped = [System.Collections.ArrayList]::new()
             $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $viaLookup = 0
+            $viaGraft = 0
+            $idx = 0
             foreach ($f in $failed) {
-                $internal = Resolve-KeepitRetryPath -DisplayPath $f.ItemPath -ScopePaths $job.RestorePaths
+                $idx++
+                if ($failed.Count -gt 20) {
+                    Write-Progress -Activity "Locating failed items in snapshot" -Status "$idx of $($failed.Count)" `
+                        -PercentComplete ([int](100 * $idx / $failed.Count))
+                }
+
+                $internal = $null
+                try {
+                    $backupId = Resolve-KeepitBackupItemId -DisplayPath $f.ItemPath -ConnectorGuid $connectorGuid `
+                        -Snaptime $job.Snaptime -BaseUrl $baseUrl -UserId $userId -AuthHeader $authHeader
+                    # The lookup returns a kng://{connector}/{path} id; the restore
+                    # engine wants just the path.
+                    if ($backupId) {
+                        $internal = $backupId -replace '^kng://[^/]+', ''
+                        $viaLookup++
+                    }
+                }
+                catch {
+                    Write-Verbose "Snapshot lookup failed for '$($f.ItemPath)': $($_.Exception.Message)"
+                }
+
+                if (-not $internal) {
+                    $internal = Resolve-KeepitRetryPath -DisplayPath $f.ItemPath -ScopePaths $job.RestorePaths
+                    if ($internal) { $viaGraft++ }
+                }
+
                 if ($internal) {
                     if ($seen.Add($internal)) {
                         [void]$items.Add([PSCustomObject]@{ Id = $internal; Title = $f.FileName; Cause = $f.Cause; Display = $f.ItemPath })
@@ -542,8 +582,10 @@ function Restore-KeepitFailedItems {
                     [void]$unmapped.Add($f.ItemPath)
                 }
             }
+            if ($failed.Count -gt 20) { Write-Progress -Activity "Locating failed items in snapshot" -Completed }
+            Write-Verbose "Resolved $viaLookup item(s) by snapshot lookup and $viaGraft by scope-path grafting."
             if ($unmapped.Count -gt 0) {
-                Write-Warning "$($unmapped.Count) failed item(s) could not be mapped to the job's restore paths and will be skipped:"
+                Write-Warning "$($unmapped.Count) failed item(s) could not be located in the job's snapshot or mapped to its restore paths, and will be skipped:"
                 $unmapped | ForEach-Object { Write-Warning "  ? $_" }
             }
             if ($items.Count -eq 0) { Write-Warning "No failed items could be mapped to a restore path; nothing to submit."; return }

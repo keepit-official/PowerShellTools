@@ -4,7 +4,11 @@
 
 - **`GroupSync/Copy-EntraGroupToKeepit.ps1`** — Creates Keepit user accounts for every member of a Microsoft Entra (Azure AD) security or distribution group, including transitive members of nested groups. Each discovered user is provisioned in Keepit with a specified role and connector access, making it easy to onboard an entire team at once.
 
+- **`CsvUsers/New-KeepitUsersFromCsv.ps1`** — Bulk-creates Keepit LimitedSupport users from a CSV of fake/test identities (GivenName, Surname, and related profile fields, no email column). Synthesizes an email/UPN per row from `GivenName.Surname@<EmailDomain>`, disambiguating duplicates, and supports a `-First` smoke-test limit. Intended for populating a test Keepit account with a large number of low-privilege users.
+
 - **`BulkSiteConfig/Add-KeepitSharePointSites.ps1`** — Bulk-adds a list of SharePoint site collections (from a plain-text or CSV file) to the manually included sites of one or more M365 connectors, in a single API call per connector. Intended for connectors that hand-pick sites rather than using a naming convention, where adding thousands of sites through the UI is impractical. De-duplicates and validates input, skips sites already present, supports `-WhatIf`, and reports a per-connector summary.
+
+- **`BulkIPAllowlist/Set-KeepitAllowedIPRanges.ps1`** — Bulk-sets a Keepit account's trusted-IP allowlist (the MFA "Trusted IPs" configuration) from a plain-text or CSV list of IPv4 CIDR ranges, working around the console limitation where the UI cannot express arbitrary CIDR prefixes such as a /16. Replaces the existing ranges or, with `-Merge`, adds to them; validates and de-duplicates input and supports `-WhatIf`. Requires primary account credentials whose role grants the "Enable and configure MFA" permission (e.g. Master Admin).
 
 - **`BulkLinks/New-BulkShareLinks.ps1`** — Generates personalized Keepit secure shared links for a list of users and exports them to a CSV. Intended for large-scale disaster recovery scenarios where an admin needs to hand each user a direct link to their own mailbox, OneDrive, or both in one operation.
 

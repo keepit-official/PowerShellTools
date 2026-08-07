@@ -1,9 +1,9 @@
-@{
+﻿@{
     # Script module or binary module file associated with this manifest
     RootModule = 'KeepitTools.psm1'
 
     # Version number of this module
-    ModuleVersion = '1.6.2'
+    ModuleVersion = '1.7.0'
 
     # Supported PSEditions
     CompatiblePSEditions = @('Core')
@@ -89,7 +89,9 @@
         'Remove-KeepitShare',
         'Start-KeepitExpressRestore',
         'Get-KeepitItemAttributes',
-        'Get-KeepitJobHistory'
+        'Get-KeepitJobHistory',
+        'Get-KeepitAllowedIPRange',
+        'Update-KeepitAllowedIPRange'
     )
 
     # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry
@@ -131,6 +133,14 @@
 
             # ReleaseNotes of this module
             ReleaseNotes = @'
+Version 1.7.0
+- Get-KeepitAllowedIPRange: New cmdlet to read the account trusted-IP allowlist (allowed IP address ranges) from the account MFA configuration (GET /users/{userId}/mfa)
+- Get-KeepitAllowedIPRange: Always returns each rule as an inclusive From/To range, whether it is stored as from/to, CIDR, or address plus prefix; a range that is one aligned CIDR block also reports Cidr/PrefixLength. -Raw returns the underlying MFA XML
+- Update-KeepitAllowedIPRange: New cmdlet to set the allowlist using IPv4 CIDR ranges (PUT /users/{userId}/mfa). Writes each CIDR as a from/to range, not a cidr element, because the Keepit WebApp IP Ranges page hangs on CIDR-based rules; read-modify-write preserves the MFA enabled flag, the rules group operator, and non-IP rules such as TOTP
+- Update-KeepitAllowedIPRange: Supports -Clear to empty the allowlist (removes all ranges, preserving the enabled flag, the rules operator, and non-IP rules such as TOTP); -Clear and -IPRange are mutually exclusive
+- Update-KeepitAllowedIPRange: Requires primary account credentials whose role grants "Enable and configure MFA" (e.g. Master Admin); distinguishes the "Primary credentials required" and "Forbidden" errors; supports -WhatIf/-Confirm (ConfirmImpact High) and -PassThru
+- Add BulkIPAllowlist example (Set-KeepitAllowedIPRanges.ps1) to bulk-set trusted IP ranges from a text or CSV file
+
 Version 1.6.2
 - Add GitHub as a supported connector type for Get-KeepitConnector and New-KeepitConnector; GitHub is DSL-based, so the API type is 'dsl' with a 'github' agent type
 - Add Autodesk Forma as a supported connector type ('autodesk-forma'), also DSL-based

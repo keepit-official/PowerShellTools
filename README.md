@@ -155,6 +155,8 @@ Remove-Module KeepitTools
 | `Get-KeepitRoles`                  | Lists available roles and their capabilities                       |
 | `Convert-KeepitGuidToUPN`          | Resolves Keepit backup GUIDs to User Principal Names               |
 | `Get-KeepitItemAttributes`         | Retrieves metadata attributes from the snapshot content API        |
+| `Get-KeepitAllowedIPRange`         | Reads the account trusted-IP allowlist as From/To ranges           |
+| `Update-KeepitAllowedIPRange`      | Sets the account trusted-IP allowlist from IPv4 CIDR ranges         |
 
 ## General Examples
 

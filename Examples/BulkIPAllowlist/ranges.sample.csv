@@ -1,0 +1,5 @@
+Cidr,Description
+10.20.0.0/16,HQ outbound range
+10.30.0.0/16,Branch office range
+10.40.0.0/16,VPN pool
+198.51.100.0/24,Data centre egress

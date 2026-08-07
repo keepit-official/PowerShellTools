@@ -1,5 +1,17 @@
 # KeepitTools Changelog
 
+## Version 1.7.0
+
+- Add `Get-KeepitAllowedIPRange` to read the account trusted-IP allowlist from the account MFA configuration. Each rule is returned as an inclusive From/To range, whether it is stored as `from`/`to`, CIDR, or an address plus prefix; when a range is one aligned CIDR block, the `Cidr` and `PrefixLength` properties are also populated. `-Raw` returns the underlying MFA XML
+- Add `Update-KeepitAllowedIPRange` to set the allowlist using IPv4 CIDR ranges. Each input CIDR is written as a `from`/`to` address range, not a `cidr` element. The update is read-modify-write: it preserves the MFA `enabled` flag, the rules group operator (`and`/`or`), and non-IP rules such as TOTP, replacing only the IP-range entries
+- Add the BulkIPAllowlist example (`Set-KeepitAllowedIPRanges.ps1`) to bulk-set trusted IP ranges from a plain-text or CSV file
+
+## Version 1.6.3
+
+- Restore-KeepitFailedItems: Locate each failed item in the job's own snapshot (search by name, matched on workload and masked path tail) and retry the internal path the backup index reports, falling back to the previous scope-path grafting when the lookup finds nothing
+- Restore-KeepitFailedItems: Fixes failed items being skipped entirely with "could not be mapped to the job's restore paths". The previous mapping could only align on a folder name spelled the same in both the display and internal namespaces, so it failed for every item when a job's restore paths end in a file name, stop at the site or "DocLibs" level (those segments never appear in a display path), or contain a hyphen in an aligning folder name (doubled internally). The snapshot lookup does not consult the restore paths at all, so it is unaffected by their shape
+- Restore-KeepitFailedItems: Show progress while locating items for jobs with more than 20 failures, and report the split between lookup- and graft-resolved items under -Verbose
+
 ## Version 1.6.2
 
 - Add GitHub as a supported connector type. `Get-KeepitConnector -Type github` (or `-Type 'GitHub'`) filters GitHub connectors, and `New-KeepitConnector -ConnectorType github` creates one; GitHub is a DSL-based connector, so the API type is `dsl` with a `github` agent type
