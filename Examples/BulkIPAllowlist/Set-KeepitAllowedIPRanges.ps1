@@ -145,4 +145,4 @@ $updateParams = @{
 if ($Environment) { $updateParams.Environment = $Environment }
 
 Update-KeepitAllowedIPRange @updateParams -PassThru |
-    Format-Table From, To, Cidr, Notation -AutoSize
+    Format-Table From, To, Cidr, Notation, Operator -AutoSize

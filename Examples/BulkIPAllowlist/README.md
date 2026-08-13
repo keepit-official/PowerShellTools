@@ -78,10 +78,11 @@ Use a non-default CSV column:
   arbitrary range that does not map to one CIDR; review the current state with
   `Get-KeepitAllowedIPRange` first.
 - **The script never enables enforcement.** It only manages the IP ranges; it
-  does not change the MFA `enabled` flag or the rules operator. On an account
-  where MFA is enabled with an `and` rule, a trusted-IP range that does not
-  include your own address can lock you out — verify with
-  `Get-KeepitAllowedIPRange -Raw` before enabling enforcement in the console.
+  does not change the MFA `enabled` flag. The ranges are written as alternatives
+  (an `or` group), so an address in any one of them is allowed. On an account
+  where MFA is enabled, an allowlist that does not include your own public
+  address locks you out — verify with `Get-KeepitAllowedIPRange -Raw` before you
+  enable enforcement in the console.
 - The underlying cmdlet validates every CIDR (octets 0–255, prefix /0–/32) and
   de-duplicates before writing.
 - **Emptying the allowlist.** This script always writes at least the ranges in

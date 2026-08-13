@@ -12,14 +12,24 @@
 #   <mfa>
 #     <enabled>true|false</enabled>
 #     <rules>
-#       <and|or>
+#       <and>
 #         <totp></totp>
-#         <ip-range><from>10.20.0.0</from><to>10.20.255.255</to></ip-range>
-#         <ip-range><cidr>10.20.0.0/16</cidr></ip-range>
-#         <ip-range><ip>192.168.1.0</ip><mask>24</mask></ip-range>
-#       </and|or>
+#         <or>
+#           <ip-range><from>10.20.0.0</from><to>10.20.255.255</to></ip-range>
+#           <ip-range><cidr>10.20.0.0/16</cidr></ip-range>
+#           <ip-range><ip>192.168.1.0</ip><mask>24</mask></ip-range>
+#         </or>
+#       </and>
 #     </rules>
 #   </mfa>
+#
+# GROUP NESTING IS SIGNIFICANT (TAC-342). Every rule in an <and> group must match.
+# Two or more <ip-range> rules as direct <and> siblings can never all match the
+# one source address of a request, so such an allowlist denies access to everyone
+# once MFA enforcement is on. Trusted-IP ranges are therefore alternatives and
+# must share an <or> group, which the WebApp nests inside the outer <and> next to
+# the MFA method. This module writes the same shape and reads <ip-range> rules at
+# any depth.
 #
 # An <ip-range> may be stored as <from>/<to>, as <cidr>, or as <ip>+<mask>. This
 # module WRITES from/to only: the WebApp "IP Ranges" page hangs on CIDR-based
@@ -28,8 +38,8 @@
 # whenever a from/to range is one aligned CIDR block.
 #
 # IP-range rules share the <rules> group with the MFA method (<totp>), so writes
-# are read-modify-write: the group operator (<and>/<or>), <enabled>, and all
-# non-ip rules are preserved; only the <ip-range> entries are managed here.
+# are read-modify-write: <enabled>, the outer group operator, and all non-ip rules
+# are preserved; only the <ip-range> entries are managed here.
 
 <#
 .SYNOPSIS
@@ -164,6 +174,158 @@ function ConvertTo-KeepitCidrFromRange {
 
 <#
 .SYNOPSIS
+    Converts one <ip-range> XML element to a From/To range object.
+.DESCRIPTION
+    Internal helper. Reads the three storage forms the API accepts (<cidr>,
+    <ip>+<mask>, and <from>/<to>) and returns the equivalent inclusive range.
+    Returns $null for an element in none of those forms.
+.OUTPUTS
+    PSCustomObject with From, To, Cidr, PrefixLength and Notation, or $null.
+#>
+function ConvertFrom-KeepitIPRangeNode {
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Xml.XmlElement]$Node
+    )
+
+    $cidr = $null
+    $prefix = $null
+
+    $cidrNode = $Node.ChildNodes | Where-Object { $_.Name -eq 'cidr' } | Select-Object -First 1
+    $ipNode = $Node.ChildNodes | Where-Object { $_.Name -eq 'ip' } | Select-Object -First 1
+    $maskNode = $Node.ChildNodes | Where-Object { $_.Name -eq 'mask' } | Select-Object -First 1
+    $fromNode = $Node.ChildNodes | Where-Object { $_.Name -eq 'from' } | Select-Object -First 1
+    $toNode = $Node.ChildNodes | Where-Object { $_.Name -eq 'to' } | Select-Object -First 1
+
+    if ($cidrNode) {
+        $cidr = $cidrNode.InnerText.Trim()
+        $address, $prefixStr = $cidr -split '/'
+        $prefix = [int]$prefixStr
+        $range = Get-KeepitIPv4Range -Address $address -PrefixLength $prefix
+        $notation = 'cidr'
+    }
+    elseif ($ipNode -and $maskNode) {
+        $address = $ipNode.InnerText.Trim()
+        $prefix = [int]$maskNode.InnerText.Trim()
+        $range = Get-KeepitIPv4Range -Address $address -PrefixLength $prefix
+        $notation = 'ip-mask'
+    }
+    elseif ($fromNode -and $toNode) {
+        $range = [PSCustomObject]@{
+            From = $fromNode.InnerText.Trim()
+            To   = $toNode.InnerText.Trim()
+        }
+        $notation = 'range'
+        # Rules written by this module are stored as from/to; surface the
+        # equivalent CIDR when the range is one aligned block so callers
+        # still see .Cidr / .PrefixLength.
+        $derivedCidr = ConvertTo-KeepitCidrFromRange -From $range.From -To $range.To
+        if ($derivedCidr) {
+            $cidr = $derivedCidr
+            $prefix = [int]($derivedCidr -split '/')[1]
+        }
+    }
+    else {
+        return $null
+    }
+
+    return [PSCustomObject]@{
+        From         = $range.From
+        To           = $range.To
+        Cidr         = $cidr
+        PrefixLength = $prefix
+        Notation     = $notation
+    }
+}
+
+<#
+.SYNOPSIS
+    Enumerates the <ip-range> rules in an MFA configuration, at any depth.
+.DESCRIPTION
+    Internal helper. The rules group nests: the WebApp stores trusted-IP ranges in
+    an <or> group inside the outer <and> group, so IP-range rules are not always
+    direct children of the outer group. This walks every <ip-range> element under
+    <rules> and reports the operator of the group that holds each one.
+.OUTPUTS
+    PSCustomObject[] with From, To, Cidr, PrefixLength, Notation and Operator.
+#>
+function Get-KeepitIPRangeRuleInternal {
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [xml]$MfaXml
+    )
+
+    $rulesNode = $MfaXml.SelectSingleNode('/mfa/rules')
+    if ($null -eq $rulesNode) {
+        Write-Verbose "No <rules> element present; no IP ranges configured."
+        return
+    }
+
+    foreach ($node in $rulesNode.SelectNodes('.//ip-range')) {
+        $range = ConvertFrom-KeepitIPRangeNode -Node $node
+        if ($null -eq $range) {
+            Write-Warning "Skipping an <ip-range> rule in an unrecognised format: $($node.OuterXml)"
+            continue
+        }
+
+        [PSCustomObject]@{
+            From         = $range.From
+            To           = $range.To
+            Cidr         = $range.Cidr
+            PrefixLength = $range.PrefixLength
+            Notation     = $range.Notation
+            Operator     = $node.ParentNode.Name
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Warns when the IP-range rules in an MFA configuration deny access to everyone.
+.DESCRIPTION
+    Internal helper. Two or more <ip-range> rules in the same <and> group must all
+    match the one source address of a request. When their ranges do not overlap,
+    no address can match, so an enabled allowlist locks out every user (TAC-342).
+#>
+function Write-KeepitIPRangeRuleWarning {
+    [CmdletBinding()]
+    [OutputType([void])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [xml]$MfaXml
+    )
+
+    $rulesNode = $MfaXml.SelectSingleNode('/mfa/rules')
+    if ($null -eq $rulesNode) { return }
+
+    foreach ($group in $rulesNode.SelectNodes('.//and')) {
+        $nodes = @($group.ChildNodes | Where-Object { $_.NodeType -eq 'Element' -and $_.Name -eq 'ip-range' })
+        if ($nodes.Count -lt 2) { continue }
+
+        $ranges = @($nodes | ForEach-Object { ConvertFrom-KeepitIPRangeNode -Node $_ } | Where-Object { $_ })
+        if ($ranges.Count -lt 2) { continue }
+
+        $widestFrom = ($ranges | ForEach-Object { ConvertTo-KeepitIPv4UInt32 -Address $_.From } | Measure-Object -Maximum).Maximum
+        $narrowestTo = ($ranges | ForEach-Object { ConvertTo-KeepitIPv4UInt32 -Address $_.To } | Measure-Object -Minimum).Minimum
+
+        if ($widestFrom -gt $narrowestTo) {
+            Write-Warning ("The allowlist cannot be satisfied: $($ranges.Count) IP-range rules are combined with AND, and the ranges do not overlap, " +
+                "so no address matches all of them. While MFA enforcement is on, this denies access to every user. " +
+                "Run Update-KeepitAllowedIPRange to rewrite the ranges as alternatives (an OR group).")
+        }
+        else {
+            Write-Warning ("$($ranges.Count) IP-range rules are combined with AND, so only addresses inside every one of them are allowed. " +
+                "Run Update-KeepitAllowedIPRange to rewrite the ranges as alternatives (an OR group).")
+        }
+    }
+}
+
+<#
+.SYNOPSIS
     Retrieves the raw account MFA configuration element (<mfa>...</mfa>) as text.
 .DESCRIPTION
     Internal helper. Returns a hashtable with the raw <mfa> string (declaration
@@ -225,6 +387,13 @@ function Get-KeepitMfaConfigInternal {
     aligned CIDR block, the .Cidr and .PrefixLength properties are also populated;
     they are $null for an arbitrary range that is not a single CIDR.
 
+    Rules are reported at any depth in the rules group, so ranges added in the
+    Keepit WebApp (which nests them in an <or> group) are listed too. The .Operator
+    property names the group that holds each rule: 'or' means the ranges are
+    alternatives, and any address in any range is allowed. Several rules with
+    Operator 'and' must all match one source address, which usually cannot happen;
+    this cmdlet warns when it finds such a set.
+
     Note: Update-KeepitAllowedIPRange writes rules as <from>/<to> (the WebApp
     cannot render CIDR-based rules), so ranges written by this module read back
     with Notation 'range' and a derived .Cidr.
@@ -257,12 +426,14 @@ function Get-KeepitMfaConfigInternal {
                 otherwise $null
         - PrefixLength: The prefix length (from CIDR or <mask>) if known
         - Notation: How the rule is stored ('cidr', 'ip-mask', or 'range')
+        - Operator: The operator of the group holding the rule ('or' = the ranges
+                    are alternatives; 'and' = every rule in the group must match)
 
     String - Raw <mfa> XML when -Raw is specified.
 .NOTES
     Ranges are only enforced when account MFA is enabled and the account uses the
     trusted-IP rules for access control. Use -Raw to inspect the <enabled> flag
-    and the rules group operator (<and>/<or>).
+    and the full rules structure.
 #>
 function Get-KeepitAllowedIPRange {
     [CmdletBinding()]
@@ -292,76 +463,10 @@ function Get-KeepitAllowedIPRange {
             return $mfa.Text
         }
 
-        # Locate the rules group (<and> or <or>) and its <ip-range> children
-        $rulesNode = $mfa.Xml.mfa.rules
-        if ($null -eq $rulesNode) {
-            Write-Verbose "No <rules> element present; no IP ranges configured."
-            return
-        }
-
-        $groupNode = $rulesNode.ChildNodes | Where-Object { $_.NodeType -eq 'Element' } | Select-Object -First 1
-        if ($null -eq $groupNode) {
-            Write-Verbose "Empty rules group; no IP ranges configured."
-            return
-        }
-
-        $ipRangeNodes = $groupNode.ChildNodes | Where-Object { $_.NodeType -eq 'Element' -and $_.Name -eq 'ip-range' }
-        foreach ($node in $ipRangeNodes) {
-            $cidr = $null
-            $prefix = $null
-            $address = $null
-            $notation = $null
-
-            $cidrNode = $node.ChildNodes | Where-Object { $_.Name -eq 'cidr' } | Select-Object -First 1
-            $ipNode = $node.ChildNodes | Where-Object { $_.Name -eq 'ip' } | Select-Object -First 1
-            $maskNode = $node.ChildNodes | Where-Object { $_.Name -eq 'mask' } | Select-Object -First 1
-            $fromNode = $node.ChildNodes | Where-Object { $_.Name -eq 'from' } | Select-Object -First 1
-            $toNode = $node.ChildNodes | Where-Object { $_.Name -eq 'to' } | Select-Object -First 1
-
-            if ($cidrNode) {
-                $cidr = $cidrNode.InnerText.Trim()
-                $address, $prefixStr = $cidr -split '/'
-                $prefix = [int]$prefixStr
-                $range = Get-KeepitIPv4Range -Address $address -PrefixLength $prefix
-                $notation = 'cidr'
-            }
-            elseif ($ipNode -and $maskNode) {
-                $address = $ipNode.InnerText.Trim()
-                $prefix = [int]$maskNode.InnerText.Trim()
-                $range = Get-KeepitIPv4Range -Address $address -PrefixLength $prefix
-                $notation = 'ip-mask'
-            }
-            elseif ($fromNode -and $toNode) {
-                $from = $fromNode.InnerText.Trim()
-                $to = $toNode.InnerText.Trim()
-                $range = [PSCustomObject]@{
-                    From         = $from
-                    To           = $to
-                    PrefixLength = $null
-                }
-                $notation = 'range'
-                # Rules written by this module are stored as from/to; surface the
-                # equivalent CIDR when the range is one aligned block so callers
-                # (and -Merge) still see .Cidr / .PrefixLength.
-                $derivedCidr = ConvertTo-KeepitCidrFromRange -From $from -To $to
-                if ($derivedCidr) {
-                    $cidr = $derivedCidr
-                    $prefix = [int]($derivedCidr -split '/')[1]
-                }
-            }
-            else {
-                Write-Warning "Skipping an <ip-range> rule in an unrecognised format: $($node.OuterXml)"
-                continue
-            }
-
-            [PSCustomObject]@{
-                From         = $range.From
-                To           = $range.To
-                Cidr         = $cidr
-                PrefixLength = $prefix
-                Notation     = $notation
-            }
-        }
+        # Report every <ip-range> rule, at whatever depth it sits in the rules
+        # group, and warn when the combination denies access to everyone.
+        Write-KeepitIPRangeRuleWarning -MfaXml $mfa.Xml
+        Get-KeepitIPRangeRuleInternal -MfaXml $mfa.Xml
     }
     catch {
         $PSCmdlet.ThrowTerminatingError(
@@ -381,9 +486,13 @@ function Get-KeepitAllowedIPRange {
 .DESCRIPTION
     Replaces the IP-range rules in the account MFA configuration
     (PUT /users/{userId}/mfa) with the supplied set of IPv4 CIDR ranges. This is a
-    read-modify-write operation: the <enabled> flag, the rules group operator
-    (<and>/<or>), and all non-IP rules (such as the <totp> MFA method) are
-    preserved; only the <ip-range> entries are replaced.
+    read-modify-write operation: the <enabled> flag, the outer rules group operator,
+    and all non-IP rules (such as the <totp> MFA method) are preserved; every
+    existing <ip-range> entry, at any depth, is replaced.
+
+    The ranges are written as alternatives, in one <or> group inside the outer rules
+    group, which is the structure the Keepit WebApp uses. Any address in any of the
+    ranges is then allowed.
 
     Each input CIDR is written as a <from>/<to> address range (the CIDR's network
     and broadcast addresses), not as a <cidr> element. The Keepit WebApp "IP
@@ -394,8 +503,9 @@ function Get-KeepitAllowedIPRange {
     Because -IPRange replaces the full allowlist, include every range you want to
     keep. To add to the existing list, read it first with Get-KeepitAllowedIPRange
     (see the BulkSiteConfig/IPAllowlist example). To remove every range and empty
-    the allowlist, use -Clear instead of -IPRange; this removes all IP-range rules
-    while preserving the <enabled> flag and non-IP rules such as TOTP.
+    the allowlist, use -Clear instead of -IPRange; this removes all IP-range rules,
+    including ranges added in the WebApp, while preserving the <enabled> flag and
+    non-IP rules such as TOTP.
 
     IMPORTANT: Writing MFA/security settings requires PRIMARY account credentials
     (a user login, not an API token) whose role grants the "Enable and configure
@@ -404,17 +514,17 @@ function Get-KeepitAllowedIPRange {
     permission is rejected with "Forbidden". Supply such credentials via
     -Credential.
 
-    This cmdlet does NOT change the <enabled> flag or the rules group operator.
-    On an enabled account whose rules use <and>, every rule must match, so a
-    trusted-IP range that does not include the caller's address can deny access.
-    Review the account's MFA state (Get-KeepitAllowedIPRange -Raw) before enabling
-    enforcement.
+    This cmdlet does NOT change the <enabled> flag. On an account with enforcement
+    on, an allowlist that does not include your own public IP address denies you
+    access, so review the account's MFA state (Get-KeepitAllowedIPRange -Raw) before
+    you enable enforcement.
 .PARAMETER IPRange
     One or more IPv4 CIDR ranges (e.g. '10.20.0.0/16') that make up the complete
-    desired allowlist. Replaces any existing IP-range rules.
+    desired allowlist. Replaces any existing IP-range rules. The ranges are written
+    as alternatives (an <or> group), so an address in any one of them is allowed.
 .PARAMETER Clear
     Remove every IP-range rule, emptying the allowlist. Mutually exclusive with
-    -IPRange. The <enabled> flag, the rules group operator, and non-IP rules
+    -IPRange. The <enabled> flag, the outer rules group operator, and non-IP rules
     (such as TOTP) are preserved.
 .PARAMETER Credential
     PSCredential for a primary account whose role can configure MFA. Recommended
@@ -433,7 +543,8 @@ function Get-KeepitAllowedIPRange {
 .EXAMPLE
     Update-KeepitAllowedIPRange -IPRange '10.20.0.0/16','10.30.0.0/16','10.40.0.0/16' -Credential $primaryCred -Confirm:$false
 
-    Sets three /16 trusted ranges in one operation without prompting.
+    Sets three /16 trusted ranges in one operation without prompting. The ranges are
+    alternatives: an address in any one of the three is allowed.
 .EXAMPLE
     $keep = Get-KeepitAllowedIPRange | ForEach-Object { $_.Cidr } | Where-Object { $_ }
     Update-KeepitAllowedIPRange -IPRange (@($keep) + '198.51.100.0/24') -Credential $primaryCred
@@ -499,50 +610,101 @@ function Update-KeepitAllowedIPRange {
         # Read current config so we can preserve enabled/operator/non-ip rules
         $mfa = Get-KeepitMfaConfigInternal -AuthHeader $authHeader -BaseUrl $baseUrl -UserId $userId
 
-        $enabled = if ($mfa.Xml.mfa.enabled) { $mfa.Xml.mfa.enabled } else { 'false' }
+        # Edit the returned document in place, so anything this module does not
+        # manage (the <enabled> flag, the MFA method, any future element) survives.
+        $doc = $mfa.Xml
+        $root = $doc.DocumentElement
 
-        $rulesNode = $mfa.Xml.mfa.rules
-        $groupNode = $null
-        if ($null -ne $rulesNode) {
-            $groupNode = $rulesNode.ChildNodes | Where-Object { $_.NodeType -eq 'Element' } | Select-Object -First 1
+        $enabledNode = $root.SelectSingleNode('enabled')
+        if ($null -eq $enabledNode) {
+            $enabledNode = $doc.CreateElement('enabled')
+            $enabledNode.InnerText = 'false'
+            [void]$root.PrependChild($enabledNode)
         }
-        if ($groupNode) {
-            $operator = $groupNode.Name    # 'and' or 'or'
+        $enabled = $enabledNode.InnerText.Trim()
+
+        $rulesNode = $root.SelectSingleNode('rules')
+        if ($null -eq $rulesNode) {
+            $rulesNode = $doc.CreateElement('rules')
+            [void]$root.AppendChild($rulesNode)
         }
-        else {
-            # No existing group. Default to 'or' (least restrictive) to avoid
-            # inadvertently locking access when enforcement is turned on.
-            $operator = 'or'
-            if (-not $clearing) {
-                Write-Warning "No existing MFA rules group found; creating an <or> group for the IP ranges."
+
+        # The outer group holds the MFA method and the trusted-IP group. Keep its
+        # operator: rewriting <or> to <and> would start requiring TOTP *and* a
+        # trusted IP. A missing group is created as <and>, the shape the WebApp
+        # writes; with only IP ranges inside it, <and> of one <or> group means the
+        # same thing as <or> on its own.
+        $groupNode = $rulesNode.ChildNodes |
+            Where-Object { $_.NodeType -eq 'Element' -and $_.Name -in @('and', 'or') } |
+            Select-Object -First 1
+        if ($null -eq $groupNode) {
+            $groupNode = $doc.CreateElement('and')
+            [void]$rulesNode.AppendChild($groupNode)
+            Write-Verbose "No existing MFA rules group found; created an <and> group."
+        }
+
+        # Drop every existing <ip-range> rule at any depth. Ranges added in the
+        # WebApp sit in a nested <or> group, so a shallow sweep of the outer group
+        # left them in place and -Clear did not clear them (TAC-342).
+        $existing = @($rulesNode.SelectNodes('.//ip-range'))
+        foreach ($old in $existing) {
+            [void]$old.ParentNode.RemoveChild($old)
+        }
+        Write-Verbose "Removed $($existing.Count) existing ip-range rule(s)."
+
+        # Remove nested groups the sweep left empty, deepest first, so no <or></or>
+        # husk remains. The outer group is kept even when empty.
+        $nestedGroups = @($rulesNode.SelectNodes('.//and | .//or'))
+        [Array]::Reverse($nestedGroups)
+        foreach ($nested in $nestedGroups) {
+            if ([object]::ReferenceEquals($nested, $groupNode)) { continue }
+            if (-not ($nested.ChildNodes | Where-Object { $_.NodeType -eq 'Element' })) {
+                [void]$nested.ParentNode.RemoveChild($nested)
             }
         }
 
-        # Preserve every non-ip-range rule (e.g. <totp>) verbatim
-        $preserved = ''
-        if ($groupNode) {
-            foreach ($child in $groupNode.ChildNodes) {
-                if ($child.NodeType -eq 'Element' -and $child.Name -ne 'ip-range') {
-                    $preserved += $child.OuterXml
-                }
+        # Write the new entries as <from>/<to>. Each CIDR maps to a single contiguous
+        # range (network address .. broadcast address). We store from/to rather than
+        # <cidr> because the WebApp "IP Ranges" page hangs on CIDR-based rules
+        # (MR !44); from/to is the representation the frontend renders safely.
+        #
+        # Trusted-IP ranges are alternatives, so they must share an <or> group. As
+        # direct <and> siblings they could never all match one source address, and
+        # enabling enforcement locked out every user (TAC-342).
+        if ($normalized.Count -gt 0) {
+            $ipParent = if ($groupNode.Name -eq 'or') {
+                # The outer group already ORs its rules; nesting another <or> would
+                # add nothing.
+                $groupNode
+            }
+            else {
+                $orGroup = $doc.CreateElement('or')
+                [void]$groupNode.AppendChild($orGroup)
+                $orGroup
+            }
+
+            foreach ($cidr in $normalized) {
+                $address, $prefixStr = $cidr -split '/'
+                $range = Get-KeepitIPv4Range -Address $address -PrefixLength ([int]$prefixStr)
+                $rangeNode = $doc.CreateElement('ip-range')
+                $fromNode = $doc.CreateElement('from')
+                $fromNode.InnerText = $range.From
+                $toNode = $doc.CreateElement('to')
+                $toNode.InnerText = $range.To
+                [void]$rangeNode.AppendChild($fromNode)
+                [void]$rangeNode.AppendChild($toNode)
+                [void]$ipParent.AppendChild($rangeNode)
             }
         }
 
-        # Build the new ip-range entries as <from>/<to>. Each CIDR maps to a single
-        # contiguous range (network address .. broadcast address). We store from/to
-        # rather than <cidr> because the WebApp "IP Ranges" page hangs on CIDR-based
-        # rules (MR !44); from/to is the representation the frontend renders safely.
-        $ipRangeXml = ''
-        foreach ($cidr in $normalized) {
-            $address, $prefixStr = $cidr -split '/'
-            $range = Get-KeepitIPv4Range -Address $address -PrefixLength ([int]$prefixStr)
-            $ipRangeXml += "<ip-range><from>$($range.From)</from><to>$($range.To)</to></ip-range>"
-        }
-
-        $newMfa = "<mfa><enabled>$enabled</enabled><rules><$operator>$preserved$ipRangeXml</$operator></rules></mfa>"
+        $newMfa = $root.OuterXml
         Write-Verbose "New MFA body: $newMfa"
 
         $rangeList = ($normalized -join ', ')
+        if ($enabled -eq 'true' -and $normalized.Count -gt 0) {
+            Write-Warning ("Account MFA enforcement is on, so this allowlist takes effect at once. Confirm that your own public IP address " +
+                "is inside one of these ranges before you continue: $rangeList")
+        }
         $target = "account $userId MFA trusted-IP allowlist"
         $action = if ($clearing) {
             "Remove all allowed IP ranges (empty the allowlist)"

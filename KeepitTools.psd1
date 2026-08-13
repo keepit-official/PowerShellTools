@@ -3,7 +3,7 @@
     RootModule = 'KeepitTools.psm1'
 
     # Version number of this module
-    ModuleVersion = '1.7.0'
+    ModuleVersion = '1.7.1'
 
     # Supported PSEditions
     CompatiblePSEditions = @('Core')
@@ -133,6 +133,13 @@
 
             # ReleaseNotes of this module
             ReleaseNotes = @'
+Version 1.7.1
+- Update-KeepitAllowedIPRange: Write the trusted IP ranges as alternatives, in one <or> group inside the outer rules group, which is the structure the Keepit WebApp uses. Version 1.7.0 appended them as direct <and> siblings, where every rule must match the one source address of a request. Two or more ranges therefore made an allowlist that no address could satisfy, and turning on MFA enforcement locked out every user (TAC-342)
+- Update-KeepitAllowedIPRange: -Clear now removes ip-range rules at any depth, so ranges added in the WebApp (which nests them in an <or> group) are cleared too. Version 1.7.0 only removed the rules directly inside the outer group and left the nested ones in place. Groups the sweep empties are removed
+- Update-KeepitAllowedIPRange: Edit the MFA document in place, so elements this module does not manage are preserved, and warn before writing when MFA enforcement is already on
+- Get-KeepitAllowedIPRange: Report ip-range rules at any depth, so ranges added in the WebApp are listed. Version 1.7.0 read only the rules directly inside the outer group, so an allowlist could read as empty while it was in force
+- Get-KeepitAllowedIPRange: New Operator property gives the operator of the group holding each rule ('or' = the ranges are alternatives; 'and' = every rule must match), and the cmdlet warns when AND-combined ranges cannot all match one address
+
 Version 1.7.0
 - Get-KeepitAllowedIPRange: New cmdlet to read the account trusted-IP allowlist (allowed IP address ranges) from the account MFA configuration (GET /users/{userId}/mfa)
 - Get-KeepitAllowedIPRange: Always returns each rule as an inclusive From/To range, whether it is stored as from/to, CIDR, or address plus prefix; a range that is one aligned CIDR block also reports Cidr/PrefixLength. -Raw returns the underlying MFA XML
