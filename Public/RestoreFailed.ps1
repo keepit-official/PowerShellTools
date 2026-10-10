@@ -101,8 +101,8 @@ function Get-KeepitJobDetail {
 
     $uri = "$BaseUrl/users/$UserId/devices/$ConnectorGuid/jobs/$JobGuid"
     $headers = @{ Authorization = $AuthHeader; Accept = 'application/vnd.keepit.v4+xml' }
-    $resp = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
-    [xml]$xml = $resp.Content
+    $resp = Invoke-WebRequest -UseBasicParsing -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+    [xml]$xml = Get-KeepitResponseText -Response $resp
     $job = $xml.job
 
     # Exec summary is an escaped XML string; pull the <summary> text out of it.
@@ -193,8 +193,8 @@ function Get-KeepitJobFailedItems {
 </and>
 "@
     $headers = @{ Authorization = $AuthHeader; Accept = 'text/csv'; 'Content-Type' = 'application/xml' }
-    $resp = Invoke-WebRequest -Uri "$BaseUrl/users/$UserId/log/filter" -Method Put -Headers $headers -Body $body -ErrorAction Stop
-    $text = if ($resp.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($resp.Content) } else { [string]$resp.Content }
+    $resp = Invoke-WebRequest -UseBasicParsing -Uri "$BaseUrl/users/$UserId/log/filter" -Method Put -Headers $headers -Body $body -ErrorAction Stop
+    $text = Get-KeepitResponseText -Response $resp
     if ([string]::IsNullOrWhiteSpace($text)) { return @() }
     ConvertFrom-KeepitJobReport -CsvText ($text -split "`r?`n")
 }

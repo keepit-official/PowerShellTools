@@ -249,8 +249,8 @@ function Get-KeepitJobs {
             # If -Raw is specified, return the raw XML response
             if ($Raw) {
                 Write-Verbose "Returning raw XML response"
-                $webResponse = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
-                $webResponse.Content
+                $webResponse = Invoke-WebRequest -UseBasicParsing -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+                Get-KeepitResponseText -Response $webResponse
                 return
             }
 
@@ -586,8 +586,8 @@ function Get-KeepitJobHistory {
             Write-Verbose "Filter XML: $filterXml"
 
             if ($Raw) {
-                $webResponse = Invoke-WebRequest -Uri $uri -Method Put -Headers $headers -Body $filterXml -ErrorAction Stop
-                $webResponse.Content
+                $webResponse = Invoke-WebRequest -UseBasicParsing -Uri $uri -Method Put -Headers $headers -Body $filterXml -ErrorAction Stop
+                Get-KeepitResponseText -Response $webResponse
                 return
             }
 

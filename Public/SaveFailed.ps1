@@ -60,9 +60,9 @@ function Resolve-KeepitBackupItemId {
     $expectedNs = Get-KeepitWorkloadNamespace -FirstSegment $segs[0]
     $query = "apiVersion=2&device=$ConnectorGuid&searchTerms=$([uri]::EscapeDataString('"' + $leaf + '"'))" +
              "&recursive=1&count=50&includeBody=1&snaptime=$([uri]::EscapeDataString($Snaptime))&filterAnd=AND:!deleted,!sys"
-    $resp = Invoke-WebRequest -Uri "$BaseUrl/users/$UserId/bsearch?$query" `
+    $resp = Invoke-WebRequest -UseBasicParsing -Uri "$BaseUrl/users/$UserId/bsearch?$query" `
         -Headers @{ Authorization = $AuthHeader; Accept = 'application/atom+xml' } -TimeoutSec 60 -ErrorAction Stop
-    $xml = [xml]$resp.Content
+    $xml = [xml](Get-KeepitResponseText -Response $resp)
     $ns = New-Object System.Xml.XmlNamespaceManager($xml.NameTable); $ns.AddNamespace('a', 'http://www.w3.org/2005/Atom')
     $maskedDisplay = @($segs | ForEach-Object { ConvertTo-KeepitMaskedSegment -Segment $_ })
 
@@ -283,7 +283,7 @@ function Save-KeepitFailedItems {
                 foreach ($b in $batches) {
                     $idXml = ($b.Items | ForEach-Object { "<id>$([System.Security.SecurityElement]::Escape($_.Id))</id>" }) -join ''
                     $body = "<?xml version=`"1.0`" ?>`n<config><type>zip</type><snapshot><tstamp>$($job.Snaptime)</tstamp>$idXml</snapshot></config>"
-                    $post = Invoke-WebRequest -Uri "$baseUrl/users/$userId/devices/$connectorGuid/downloads" -Method Post `
+                    $post = Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/users/$userId/devices/$connectorGuid/downloads" -Method Post `
                         -Headers @{ Authorization = $authHeader; 'Content-Type' = 'application/xml' } -Body $body -TimeoutSec 60 -ErrorAction Stop
                     $location = $post.Headers['location']; if ($location -is [array]) { $location = $location[0] }
                     if (-not $location) { throw "Download request returned no URL (status $($post.StatusCode))." }
@@ -291,7 +291,7 @@ function Save-KeepitFailedItems {
 
                     $deadline = (Get-Date).AddSeconds($TimeoutSec); $bytes = $null
                     while ((Get-Date) -lt $deadline) {
-                        $dl = Invoke-WebRequest -Uri $downloadUrl -TimeoutSec 120 -SkipHttpErrorCheck
+                        $dl = Invoke-KeepitWebRequest -Uri $downloadUrl -TimeoutSec 120
                         if ($dl.StatusCode -eq 200) { $bytes = $dl.Content; break }
                         Write-Verbose "Download not ready (status $($dl.StatusCode)); retrying..."
                         Start-Sleep -Seconds 5

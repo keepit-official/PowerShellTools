@@ -321,8 +321,8 @@ function Get-KeepitConnector {
             # If -Raw is specified, return the raw XML response
             if ($Raw) {
                 Write-Verbose "Returning raw XML response"
-                $webResponse = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
-                $webResponse.Content
+                $webResponse = Invoke-WebRequest -UseBasicParsing -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+                Get-KeepitResponseText -Response $webResponse
                 $rawMode = $true
                 return
             }
@@ -646,13 +646,8 @@ function Get-KeepitConnectorConfiguration {
                     'Accept'        = 'application/vnd.keepit.v4+xml'
                 }
 
-                $webResponse = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
-                $rawXml = if ($webResponse.Content -is [byte[]]) {
-                    [System.Text.Encoding]::UTF8.GetString($webResponse.Content)
-                }
-                else {
-                    $webResponse.Content
-                }
+                $webResponse = Invoke-WebRequest -UseBasicParsing -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+                $rawXml = Get-KeepitResponseText -Response $webResponse
 
                 Write-Verbose "Raw XML retrieved: $($rawXml.Length) characters"
                 return $rawXml
@@ -706,18 +701,13 @@ function Get-KeepitConnectorConfiguration {
 
                 try {
                     # Make API call - use Invoke-WebRequest to get raw content since API returns octet-stream
-                    $webResponse = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+                    $webResponse = Invoke-WebRequest -UseBasicParsing -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
 
                     Write-Verbose "Response Content-Type: $($webResponse.Headers.'Content-Type')"
                     Write-Verbose "Response length: $($webResponse.Content.Length) bytes"
 
                     # Get the raw content as a string
-                    $configXml = if ($webResponse.Content -is [byte[]]) {
-                        [System.Text.Encoding]::UTF8.GetString($webResponse.Content)
-                    }
-                    else {
-                        $webResponse.Content
-                    }
+                    $configXml = Get-KeepitResponseText -Response $webResponse
 
                     Write-Verbose "Configuration retrieved: $($configXml.Length) characters"
                 }
@@ -745,13 +735,8 @@ function Get-KeepitConnectorConfiguration {
                     $uri = "$baseUrl/users/$userId/devices/$connectorGuid/attributes"
 
                     try {
-                        $webResponse = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
-                        $responseContent = if ($webResponse.Content -is [byte[]]) {
-                            [System.Text.Encoding]::UTF8.GetString($webResponse.Content)
-                        }
-                        else {
-                            $webResponse.Content
-                        }
+                        $webResponse = Invoke-WebRequest -UseBasicParsing -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+                        $responseContent = Get-KeepitResponseText -Response $webResponse
 
                         Write-Verbose "All attributes response: $($responseContent.Substring(0, [Math]::Min(200, $responseContent.Length)))"
 
@@ -774,13 +759,8 @@ function Get-KeepitConnectorConfiguration {
                         foreach ($attrName in $attrNames) {
                             $attrUri = "$baseUrl/users/$userId/devices/$connectorGuid/attributes/$attrName"
                             try {
-                                $attrResponse = Invoke-WebRequest -Uri $attrUri -Method Get -Headers $headers -ErrorAction Stop
-                                $attrValue = if ($attrResponse.Content -is [byte[]]) {
-                                    [System.Text.Encoding]::UTF8.GetString($attrResponse.Content)
-                                }
-                                else {
-                                    $attrResponse.Content
-                                }
+                                $attrResponse = Invoke-WebRequest -UseBasicParsing -Uri $attrUri -Method Get -Headers $headers -ErrorAction Stop
+                                $attrValue = Get-KeepitResponseText -Response $attrResponse
 
                                 if ([string]::IsNullOrWhiteSpace($attrValue)) {
                                     $attributesResult[$attrName] = $null
@@ -809,13 +789,8 @@ function Get-KeepitConnectorConfiguration {
                         Write-Verbose "Fetching attribute '$attrName' from: $uri"
 
                         try {
-                            $webResponse = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
-                            $attrValue = if ($webResponse.Content -is [byte[]]) {
-                                [System.Text.Encoding]::UTF8.GetString($webResponse.Content)
-                            }
-                            else {
-                                $webResponse.Content
-                            }
+                            $webResponse = Invoke-WebRequest -UseBasicParsing -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+                            $attrValue = Get-KeepitResponseText -Response $webResponse
 
                             # Check if the value is empty
                             if ([string]::IsNullOrWhiteSpace($attrValue)) {
@@ -841,7 +816,7 @@ function Get-KeepitConnectorConfiguration {
             if ($Workload -and $configXml) {
                 Write-Verbose "Parsing configuration JSON and filtering by workloads: $($Workload -join ', ')"
                 try {
-                    $fullConfig = $configXml | ConvertFrom-Json -AsHashtable
+                    $fullConfig = $configXml | ConvertFrom-KeepitJson
 
                     # If -Coverage is specified, dispatch to appropriate coverage helper
                     if ($Coverage) {
@@ -1092,7 +1067,7 @@ function Set-KeepitConnectorConfiguration {
             }
             # Basic JSON validation
             try {
-                $null = $_ | ConvertFrom-Json -AsHashtable
+                $null = $_ | ConvertFrom-Json
                 $true
             }
             catch {
@@ -1381,7 +1356,7 @@ function Set-KeepitConnectorConfiguration {
 
                 # Parse configuration as JSON
                 try {
-                    $configObj = $effectiveRawConfig | ConvertFrom-Json -AsHashtable
+                    $configObj = $effectiveRawConfig | ConvertFrom-KeepitJson
                 }
                 catch {
                     $PSCmdlet.ThrowTerminatingError(
@@ -1703,7 +1678,7 @@ function Set-KeepitConnectorConfiguration {
                 Write-Verbose "Making PUT request to set configuration..."
 
                 try {
-                    $response = Invoke-WebRequest -Uri $uri -Method Put -Headers $headers -Body $bodyBytes -ErrorAction Stop
+                    $response = Invoke-WebRequest -UseBasicParsing -Uri $uri -Method Put -Headers $headers -Body $bodyBytes -ErrorAction Stop
                     Write-Verbose "Response status: $($response.StatusCode) $($response.StatusDescription)"
 
                     # Return success object
@@ -1947,17 +1922,17 @@ function New-KeepitConnector {
 
         Write-Verbose "=== Sending API Request ==="
 
-        # Using -SkipHttpErrorCheck to handle API error responses manually.
-        # This allows parsing structured error XML from the response body
-        # rather than catching a generic WebException.
-        $webResponse = Invoke-WebRequest -Uri $uri -Method Post -Headers $headers -Body $xmlBody -SkipHttpErrorCheck
+        # Invoke-KeepitWebRequest returns the response for every status code,
+        # so the structured error XML in the body can be parsed here instead
+        # of catching a generic exception.
+        $webResponse = Invoke-KeepitWebRequest -Uri $uri -Method Post -Headers $headers -Body $xmlBody
 
         Write-Verbose "=== API Response Received ==="
         Write-Verbose "Status Code: $($webResponse.StatusCode)"
 
         # Check for HTTP errors
         if ($webResponse.StatusCode -ge 400) {
-            $errorBody = $webResponse.Content
+            $errorBody = Get-KeepitResponseText -Response $webResponse
             Write-Verbose "Error response body: $errorBody"
 
             $apiError = $null
@@ -1985,13 +1960,14 @@ function New-KeepitConnector {
 
         # Parse successful response
         $response = $null
-        if ($webResponse.Content) {
+        $responseText = Get-KeepitResponseText -Response $webResponse
+        if ($responseText) {
             try {
-                $response = [xml]$webResponse.Content
+                $response = [xml]$responseText
             }
             catch {
                 Write-Verbose "Could not parse response as XML: $($_.Exception.Message)"
-                $response = $webResponse.Content
+                $response = $responseText
             }
         }
 
@@ -2043,9 +2019,11 @@ function New-KeepitConnector {
             Write-Verbose "Response is string, attempting XML parse"
             try {
                 $xml = [xml]$response
-                $connectorGuid = $xml.cloud.guid ?? $xml.device.guid
-                $createdAt = $xml.cloud.created ?? $xml.device.created
-                $responseRetention = $xml.cloud.'backup-retention' ?? $xml.device.'backup-retention'
+                # The response root is <cloud> or <device>. Read from <cloud> first and
+                # fall back to <device>. The ?? operator is not available on 5.1.
+                $connectorGuid = if ($null -ne $xml.cloud.guid) { $xml.cloud.guid } else { $xml.device.guid }
+                $createdAt = if ($null -ne $xml.cloud.created) { $xml.cloud.created } else { $xml.device.created }
+                $responseRetention = if ($null -ne $xml.cloud.'backup-retention') { $xml.cloud.'backup-retention' } else { $xml.device.'backup-retention' }
             }
             catch {
                 Write-Verbose "Could not parse response as XML: $($_.Exception.Message)"

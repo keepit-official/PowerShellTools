@@ -238,15 +238,15 @@ function New-KeepitShare {
             Write-Verbose "=== Sending API Request ==="
 
             if ($PSCmdlet.ShouldProcess("$Path on connector $connectorGuid", 'Create share')) {
-                # Use Invoke-WebRequest to capture Location header
-                $webResponse = Invoke-WebRequest -Uri $uri -Method Post -Headers $headers -Body $xmlBody -SkipHttpErrorCheck -ErrorAction Stop
+                # Use Invoke-KeepitWebRequest to read the status code and the Location header
+                $webResponse = Invoke-KeepitWebRequest -Uri $uri -Method Post -Headers $headers -Body $xmlBody
 
                 Write-Verbose "=== API Response Received ==="
                 Write-Verbose "Status Code: $($webResponse.StatusCode)"
 
                 # Check for HTTP errors
                 if ($webResponse.StatusCode -ge 400) {
-                    $errorBody = $webResponse.Content
+                    $errorBody = Get-KeepitResponseText -Response $webResponse
                     Write-Verbose "Error response body: $errorBody"
 
                     $apiError = $null

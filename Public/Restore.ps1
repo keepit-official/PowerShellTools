@@ -126,8 +126,8 @@ function Submit-KeepitJob {
 
             # Make API call using Invoke-WebRequest for raw response handling
             if ($PSCmdlet.ShouldProcess("connector $connectorGuid", 'Submit job')) {
-                $webResponse = Invoke-WebRequest -Uri $uri -Method Post -Headers $headers -Body $Configuration -ErrorAction Stop
-                $rawContent = $webResponse.Content
+                $webResponse = Invoke-WebRequest -UseBasicParsing -Uri $uri -Method Post -Headers $headers -Body $Configuration -ErrorAction Stop
+                $rawContent = Get-KeepitResponseText -Response $webResponse
 
                 Write-Verbose "=== API Response ==="
                 Write-Verbose "Status Code: $($webResponse.StatusCode)"
@@ -1116,13 +1116,8 @@ function Convert-KeepitUPNToGuid {
             }
 
             # Make API call - use Invoke-WebRequest for raw response
-            $webResponse = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
-            $rawContent = $webResponse.Content
-
-            # Handle byte array response (PowerShell 7 may return byte[] for some content types)
-            if ($rawContent -is [byte[]]) {
-                $rawContent = [System.Text.Encoding]::UTF8.GetString($rawContent)
-            }
+            $webResponse = Invoke-WebRequest -UseBasicParsing -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+            $rawContent = Get-KeepitResponseText -Response $webResponse
 
             Write-Verbose "Response Status: $($webResponse.StatusCode)"
             Write-Verbose "Response Content-Type: $($webResponse.Headers.'Content-Type')"

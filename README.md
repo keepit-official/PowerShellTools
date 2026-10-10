@@ -8,7 +8,23 @@ In addition, this module provides cmdlets to perform restores of large numbers o
 
 ## Requirements
 
-- PowerShell 7.0 or later on Windows, macOS, and Linux
+- Windows PowerShell 5.1 on Windows, or PowerShell 7.0 or later on Windows,
+  macOS, and Linux
+
+Notes for Windows PowerShell 5.1:
+
+- The module enables TLS 1.2 for the session when it loads, because older
+  .NET Framework builds leave it out of the default protocol list.
+- Desktop notifications (`-Notify`) use the Windows balloon tip, as on
+  PowerShell 7 on Windows.
+- `ConvertTo-Json` on 5.1 writes `<`, `>`, and `&` as `\u003c`, `\u003e`,
+  and `\u0026`. The Keepit API reads both forms, but a raw configuration
+  exported on 5.1 and one exported on 7 can differ in this way.
+- Windows PowerShell 5.1 and PowerShell 7 use different module paths. A
+  module installed under one shell is not visible to the other. Run
+  `Install-Module` or copy the module files once in each shell you use.
+- The scripts in the `Examples/` directory require PowerShell 7.0 or later.
+  See [Example Scripts](#example-scripts).
 
 ## Installation and Usage
 
@@ -49,6 +65,10 @@ Get-Module KeepitTools
 For permanent installation, copy the module to your PowerShell modules directory:
 
 **Windows:**
+
+The path below is for PowerShell 7. For Windows PowerShell 5.1, use
+`$env:USERPROFILE\Documents\WindowsPowerShell\Modules\KeepitTools` instead.
+Each shell reads only its own module path.
 
 ```powershell
 # Create module directory
@@ -688,6 +708,9 @@ Remove-KeepitUser -Identity "jane@example.com" -WhatIf
 ## Example Scripts
 
 The `Examples/` directory contains standalone PowerShell scripts that demonstrate common workflows using the KeepitTools module.
+
+The example scripts require PowerShell 7.0 or later. They do not run on
+Windows PowerShell 5.1, although the module itself does.
 
 ### GroupSync — Copy-EntraGroupToKeepit.ps1
 

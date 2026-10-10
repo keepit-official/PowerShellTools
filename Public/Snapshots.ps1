@@ -1060,7 +1060,7 @@ function Search-KeepitSnapshot {
                 # Use Invoke-WebRequest for raw response to avoid PowerShell's unpredictable XML deserialization
                 $webResponse = $null
                 try {
-                    $webResponse = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+                    $webResponse = Invoke-WebRequest -UseBasicParsing -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
                 }
                 catch {
                     # Handle 404 errors gracefully
@@ -1079,12 +1079,7 @@ function Search-KeepitSnapshot {
                     # Re-throw other errors to be handled by the outer catch block
                     throw
                 }
-                $rawContent = $webResponse.Content
-
-                # Handle byte array response (PowerShell 7 may return byte[] for some content types)
-                if ($rawContent -is [byte[]]) {
-                    $rawContent = [System.Text.Encoding]::UTF8.GetString($rawContent)
-                }
+                $rawContent = Get-KeepitResponseText -Response $webResponse
 
                 Write-Verbose "CountOnly Response Status: $($webResponse.StatusCode)"
                 Write-Verbose "CountOnly Response Content-Type: $($webResponse.Headers.'Content-Type')"
@@ -1171,7 +1166,7 @@ function Search-KeepitSnapshot {
                         if ($response.DocumentElement) {
                             Write-Verbose "Root element: $($response.DocumentElement.LocalName)"
                             if ($response.DocumentElement.ChildNodes) {
-                                Write-Verbose "Child elements: $($response.DocumentElement.ChildNodes | ForEach-Object { $_.LocalName } | Join-String -Separator ', ')"
+                                Write-Verbose "Child elements: $(@($response.DocumentElement.ChildNodes | ForEach-Object { $_.LocalName }) -join ', ')"
                             }
                         }
                     }
@@ -1277,7 +1272,7 @@ function Search-KeepitSnapshot {
                             Write-Verbose "Entry type: $($entry.GetType().FullName)"
                             if ($entry -is [System.Xml.XmlElement]) {
                                 Write-Verbose "Entry is XmlElement, LocalName: $($entry.LocalName)"
-                                Write-Verbose "Child elements: $($entry.ChildNodes | ForEach-Object { $_.LocalName } | Where-Object { $_ } | Join-String -Separator ', ')"
+                                Write-Verbose "Child elements: $(@($entry.ChildNodes | ForEach-Object { $_.LocalName } | Where-Object { $_ }) -join ', ')"
                             }
                             else {
                                 $entryProps = $entry.PSObject.Properties.Name -join ', '

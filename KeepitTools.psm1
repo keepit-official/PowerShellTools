@@ -1,5 +1,3 @@
-#Requires -Version 7.0
-
 <#
 .SYNOPSIS
     Keepit Tools PowerShell Module
@@ -12,6 +10,14 @@
 #>
 
 # KeepitTools.psm1 - Module loader
+
+# Windows PowerShell 5.1 runs on .NET Framework, where the default protocol
+# list can leave out TLS 1.2 on older Windows builds. The Keepit API requires
+# TLS 1.2 or later. PowerShell 7 negotiates it by default.
+if ($PSVersionTable.PSEdition -ne 'Core') {
+    [System.Net.ServicePointManager]::SecurityProtocol =
+        [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+}
 # Dot-source private helpers first (order matters: state before helpers)
 . "$PSScriptRoot/Private/ConnectionState.ps1"
 . "$PSScriptRoot/Private/Helpers.ps1"

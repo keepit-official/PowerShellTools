@@ -89,7 +89,7 @@ function New-KeepitUser {
         # API returns 202 Accepted if the user does not exist, 409 Conflict if they do
         $checkUri = "$baseUrl/users/$userId/tokens?aname=$([System.Uri]::EscapeDataString($Email))"
         Write-Verbose "Checking user existence: HEAD $checkUri"
-        $headResponse = Invoke-WebRequest -Uri $checkUri -Method Head -Headers $headers -SkipHttpErrorCheck
+        $headResponse = Invoke-KeepitWebRequest -Uri $checkUri -Method Head -Headers $headers
         if ($headResponse.StatusCode -eq 409) {
             throw "User '$Email' already exists."
         }
@@ -148,7 +148,7 @@ function New-KeepitUser {
             Write-Verbose "Creating user token: POST $createUri"
             Write-Verbose "Request body: $($tokenXml -replace '<apass>[^<]*</apass>', '<apass>***</apass>')"
 
-            $createResponse = Invoke-WebRequest -Uri $createUri -Method Post -Headers $headers -Body $tokenXml -SkipHttpErrorCheck
+            $createResponse = Invoke-KeepitWebRequest -Uri $createUri -Method Post -Headers $headers -Body $tokenXml
             Write-Verbose "Create token response: HTTP $($createResponse.StatusCode)"
             if ($createResponse.StatusCode -eq 409) {
                 throw "User '$Email' already exists."
@@ -323,7 +323,7 @@ function Remove-KeepitUser {
         # Verify user exists before prompting for confirmation
         $checkUri = "$baseUrl/users/$userId/tokens?aname=$([System.Uri]::EscapeDataString($Identity))"
         Write-Verbose "Checking user existence: HEAD $checkUri"
-        $headResponse = Invoke-WebRequest -Uri $checkUri -Method Head -Headers $headers -SkipHttpErrorCheck
+        $headResponse = Invoke-KeepitWebRequest -Uri $checkUri -Method Head -Headers $headers
         if ($headResponse.StatusCode -eq 202) {
             throw "User '$Identity' not found."
         }
@@ -336,7 +336,7 @@ function Remove-KeepitUser {
         if ($PSCmdlet.ShouldProcess($Identity, "Remove Keepit user")) {
             $deleteUri = "$baseUrl/users/$userId/tokens/$([System.Uri]::EscapeDataString($Identity))"
             Write-Verbose "Deleting user token: DELETE $deleteUri"
-            $deleteResponse = Invoke-WebRequest -Uri $deleteUri -Method Delete -Headers $headers -SkipHttpErrorCheck
+            $deleteResponse = Invoke-KeepitWebRequest -Uri $deleteUri -Method Delete -Headers $headers
             if ($deleteResponse.StatusCode -eq 404) {
                 throw "User '$Identity' not found."
             }
@@ -405,7 +405,8 @@ function Get-KeepitUser {
         $uri = "$baseUrl/users/$userId/tokens"
         Write-Verbose "GET $uri"
 
-        [xml]$response = (Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop).Content
+        $webResponse = Invoke-WebRequest -UseBasicParsing -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+        [xml]$response = Get-KeepitResponseText -Response $webResponse
 
         if ($response.tokens.token) {
             $tokenNodes = if ($response.tokens.token -is [System.Array]) {
